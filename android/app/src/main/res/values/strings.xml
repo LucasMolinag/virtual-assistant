@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Vella</string>
+    <string name="widget_name">Vella agenda</string>
+    <string name="widget_description">Your calendar by week or month, with each appointment under its day.</string>
+    <string name="allow_calendar">Allow calendar access</string>
+    <string name="widget_needs_permission">Allow calendar access in Vella</string>
+    <string name="widget_empty">Nothing on your calendar this month</string>
+    <string name="talk_vella">Talk to Vella</string>
+    <string name="talk_widget_name">Talk to Vella</string>
+    <string name="talk_widget_description">Opens the microphone so you can tell Vella what to change.</string>
+    <string name="widget_prev">Previous</string>
+    <string name="widget_next">Next</string>
+    <string name="widget_today">Today</string>
+    <string name="widget_add">Add appointment</string>
+    <string name="widget_week">Week</string>
+    <string name="widget_week_empty">Nothing this week</string>
+    <string name="widget_month">Month</string>
+    <string name="listening">Listening…</string>
+    <string name="opening_mic">Opening the mic…</string>
+    <string name="how_to_add">Touch and hold the home screen, tap Widgets, then drag Vella agenda or Talk to Vella onto the screen.</string>
+</resources>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#FF101214</color>
+    <color name="panel">#FF1B1F26</color>
+    <color name="paper">#FFF3F4F6</color>
+    <color name="muted">#FF9AA3AF</color>
+    <color name="faint">#FF5C6570</color>
+    <color name="accent">#FF3ECFB2</color>
+    <color name="accent_ink">#FF06221C</color>
+    <color name="sage">#FF9AA3AF</color>
+    <color name="chip">#2E3ECFB2</color>
+    <color name="chip_ink">#FFC8F7EC</color>
+    <color name="chip_alt">#334A6FA5</color>
+    <color name="holiday">#55D4A017</color>
+    <color name="holiday_ink">#FFFFE7B8</color>
+</resources>

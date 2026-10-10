@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#101214" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>Vella</title>
+    <link rel="icon" href="./icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top">
+        <div>
+          <p class="brand">Vella</p>
+          <p class="date" id="today-label"></p>
+        </div>
+        <div class="top-actions">
+          <button type="button" id="undo" class="text-button" hidden>Undo</button>
+          <button type="button" id="install" class="text-button" hidden>Install</button>
+          <button type="button" id="settings-open" class="icon-button" aria-label="Settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path fill="currentColor" d="M19.1 12.9a7.4 7.4 0 0 0 .1-1.8l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-1.6-.9l-.4-2.5h-4l-.4 2.5a7.6 7.6 0 0 0-1.6.9l-2.4-1-2 3.4 2 1.6a7.4 7.4 0 0 0 0 1.8l-2 1.6 2 3.4 2.4-1c.5.4 1 .7 1.6.9l.4 2.5h4l.4-2.5c.6-.2 1.1-.5 1.6-.9l2.4 1 2-3.4-2-1.6zM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <nav class="views" role="tablist" aria-label="Views">
+        <button type="button" id="view-month" role="tab" aria-selected="true">Month</button>
+        <button type="button" id="view-day" role="tab" aria-selected="false">Day</button>
+        <button type="button" id="view-chat" role="tab" aria-selected="false">Messages</button>
+      </nav>
+      <button type="button" id="notice" class="notice" hidden></button>
+
+      <div class="stage">
+        <section id="panel-month" aria-label="Month">
+          <div class="month-bar">
+            <button type="button" id="month-prev" class="icon-button" aria-label="Previous month">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M15 6l-6 6 6 6"/></svg>
+            </button>
+            <h2 id="month-label"></h2>
+            <button type="button" id="month-next" class="icon-button" aria-label="Next month">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6"/></svg>
+            </button>
+          </div>
+          <div class="weekday-row" aria-hidden="true">
+            <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+          </div>
+          <div id="month-grid" class="month-grid" role="grid" aria-label="Month"></div>
+          <h3 class="day-heading" id="month-day-heading"></h3>
+          <div class="agenda" id="month-agenda"></div>
+        </section>
+
+        <section id="panel-day" hidden aria-label="Day">
+          <div class="days" id="days" role="tablist" aria-label="Days"></div>
+          <h3 class="day-heading" id="day-heading"></h3>
+          <div class="agenda" id="agenda"></div>
+        </section>
+
+        <section id="panel-chat" class="thread" hidden aria-label="Conversation">
+          <div id="thread"></div>
+          <div class="chips" id="examples"></div>
+        </section>
+      </div>
+      <p id="live" class="sr-only" aria-live="polite"></p>
+
+      <form id="composer">
+        <label class="sr-only" for="command">Calendar command</label>
+        <input id="command" name="command" enterkeyhint="send" autocomplete="off" placeholder="Add lunch tomorrow at 8 PM" />
+        <button type="button" id="mic" class="mic" aria-pressed="false" aria-label="Speak a command">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2z"/>
+          </svg>
+        </button>
+      </form>
+      <p class="hint" id="mic-hint"></p>
+    </div>
+
+    <dialog id="event-dialog" aria-labelledby="event-heading">
+      <form id="event-form">
+        <div class="sheet-head">
+          <h2 id="event-heading">Appointment</h2>
+          <button type="button" id="event-close" class="icon-button" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg>
+          </button>
+        </div>
+        <label>Title <input id="event-title" required /></label>
+        <div class="field-row">
+          <label>Starts <input id="event-date" type="date" required /></label>
+          <label>Ends <input id="event-end-date" type="date" required /></label>
+        </div>
+        <div class="field-row">
+          <label>From <input id="event-start" type="time" required /></label>
+          <label>Until <input id="event-end" type="time" required /></label>
+        </div>
+        <label>Location <input id="event-location" /></label>
+        <label>Notes <textarea id="event-notes" rows="3"></textarea></label>
+        <p id="event-error" class="form-error" hidden></p>
+        <div class="form-actions">
+          <button type="button" id="event-delete" class="danger">Delete</button>
+          <a id="event-google" href="" target="_blank" rel="noopener" hidden>Open in Google Calendar</a>
+          <button type="submit" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="settings-dialog" aria-labelledby="settings-heading">
+      <form id="settings-form">
+        <div class="sheet-head">
+          <h2 id="settings-heading">Settings</h2>
+          <button type="button" id="settings-close" class="icon-button" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z"/></svg>
+          </button>
+        </div>
+        <label class="check">
+          <input id="speak-toggle" type="checkbox" checked />
+          Speak replies out loud
+        </label>
+        <p>Talk to her in English. She reads the reply out loud with English voice 3. Say “undo” or tap Undo to reverse the last change.</p>
+        <section class="setup" id="google-setup">
+          <h3>Google Calendar</h3>
+          <p id="connection-copy">Appointments stay on this phone until you connect. After that, Vella adds and edits the Google Calendar your Android phone already syncs.</p>
+          <ol>
+            <li>In Google Cloud, enable the Google Calendar API.</li>
+            <li>Configure the OAuth consent screen and add your Gmail address as a test user.</li>
+            <li>Create an OAuth client ID of type Web application.</li>
+            <li>Under Authorized JavaScript origins, add <code id="origin"></code></li>
+            <li>Paste the client ID below and tap Connect.</li>
+          </ol>
+          <label>OAuth client ID
+            <input id="client-id" placeholder="xxxx.apps.googleusercontent.com" autocomplete="off" spellcheck="false" />
+          </label>
+          <p id="settings-error" class="form-error" hidden></p>
+          <div class="form-actions">
+            <button type="button" id="disconnect" class="danger" hidden>Disconnect</button>
+            <button type="button" id="import-local" hidden>Copy phone appointments to Google</button>
+            <button type="button" id="connect" class="primary">Connect</button>
+          </div>
+        </section>
+        <section class="setup">
+          <h3>Install on Android</h3>
+          <ol>
+            <li>Open this app in Chrome on your phone. The address has to be https.</li>
+            <li>Tap the Chrome menu, then Install app or Add to Home screen.</li>
+            <li>Open Vella from the home screen and allow the microphone.</li>
+          </ol>
+          <p>If the installed app will not hear you, use the microphone on the Android keyboard in the text field. That still sends the same commands.</p>
+        </section>
+        <section class="setup">
+          <h3>Home screen widget</h3>
+          <p>Install the Vella Android app and allow calendar access. Touch and hold the home screen, tap Widgets, and drag Vella agenda onto the screen. Use Week or Month on the widget. Each day lists its appointments underneath. Drag Talk to Vella on separately when you want to speak a change.</p>
+        </section>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
