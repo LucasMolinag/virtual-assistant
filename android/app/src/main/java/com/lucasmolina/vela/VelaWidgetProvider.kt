@@ -170,7 +170,14 @@ class VelaWidgetProvider : AppWidgetProvider() {
                         val numberId = context.resources.getIdentifier("d$index", "id", context.packageName)
                         views.setTextViewText(numberId, cell.number)
                         views.setTextColor(numberId, if (cell.today) accent else if (cell.inMonth) ink else faint)
-                        views.setInt(numberId, "setBackgroundResource", if (cell.today) R.drawable.widget_today else R.drawable.widget_clear)
+                        val dayId = context.resources.getIdentifier("cell$index", "id", context.packageName)
+                        if (dayId != 0) {
+                            views.setInt(
+                                dayId,
+                                "setBackgroundResource",
+                                if (cell.today) R.drawable.widget_today else R.drawable.widget_clear,
+                            )
+                        }
                         monthLaneIds.forEachIndexed { lane, prefix ->
                             val id = context.resources.getIdentifier("$prefix$index", "id", context.packageName)
                             if (id != 0) {
@@ -285,7 +292,7 @@ class VelaWidgetProvider : AppWidgetProvider() {
                 else -> return 2
             }
             val cell = (height - 108f) / weeks.coerceAtLeast(1)
-            val lanes = ((cell - 19f - 12f) / 15f).toInt()
+            val lanes = ((cell - 24f - 12f) / 15f).toInt()
             return lanes.coerceIn(2, MONTH_LANE_CAP)
         }
 
@@ -323,11 +330,11 @@ class VelaWidgetProvider : AppWidgetProvider() {
             views.setInt(id, "setBackgroundResource", barBackground(mark))
             if (Build.VERSION.SDK_INT >= 31) {
                 val start = when (mark.kind) {
-                    MarkKind.MID, MarkKind.END -> -1f
+                    MarkKind.MID, MarkKind.END -> -3f
                     else -> 0f
                 }
                 val end = when (mark.kind) {
-                    MarkKind.MID, MarkKind.START -> -1f
+                    MarkKind.MID, MarkKind.START -> -3f
                     else -> 0f
                 }
                 views.setViewLayoutMargin(id, RemoteViews.MARGIN_START, start, TypedValue.COMPLEX_UNIT_DIP)
