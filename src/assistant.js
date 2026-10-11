@@ -1,10 +1,33 @@
 import { addMinutes, formatClock, formatWhen, rangesOverlap, spansMultipleDays } from './dates.js';
-import { findCandidates, numberFrom, parseCommand, parseWhen } from './parse.js';
+import { findCandidates, lookupEvents, numberFrom, parseCommand, parseWhen } from './parse.js';
 import { atClock, lines, rangeSpoken, whenSpoken } from './voice.js';
 
-const HELP = 'You can say: add dentist tomorrow at 3 PM. Move dentist to Friday at 4. Rename dentist to Dental checkup. Cancel dentist. What is on my calendar today?';
+const SKIP_PLACE = /^(?:home|work|the office|office|online|zoom|phone|virtual|my house)$/i;
 
-export function createAssistant({ calendar, now = () => new Date() }) {
+async function defaultLookup(name) {
+  if (typeof window === 'undefined' || typeof window.VellaNative?.lookupPlace !== 'function') return null;
+  try {
+    const parsed = JSON.parse(window.VellaNative.lookupPlace(name));
+    if (parsed.error) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function defaultAsk(question) {
+  if (typeof window !== 'undefined' && typeof window.VellaNative?.ask === 'function') {
+    try {
+      const parsed = JSON.parse(window.VellaNative.ask(question));
+      if (parsed.reply) return parsed;
+    } catch {
+      return { reply: "I couldn't look that up.", spoken: "I couldn't look that up." };
+    }
+  }
+  return { reply: "I couldn't look that up.", spoken: "I couldn't look that up." };
+}
+
+export function createAssistant({ calendar, now = () => new Date(), lookupPlace = defaultLookup, ask = defaultAsk }) {
   let pending = null;
 
   async function upcoming() {
@@ -26,6 +49,7 @@ export function createAssistant({ calendar, now = () => new Date() }) {
         return undoLast();
       }
       if (pending?.type === 'when') return finishAdd(text);
+      if (pending?.type === 'place') return finishPlace(text);
       if (pending?.type === 'choose') return finishChoice(text);
       return run(parseCommand(text, now()));
     },
@@ -48,6 +72,23 @@ export function createAssistant({ calendar, now = () => new Date() }) {
       durationMinutes: when.durationMinutes || draft.durationMinutes,
       assumedTime: when.assumedTime,
     });
+  }
+
+  async function finishPlace(text) {
+    const event = pending.event;
+    if (/^(?:please\s+)?(?:cancel|move|undo|rename|what(?:'s| is) on|what do i have)\b/i.test(text)) {
+      pending = null;
+      return run(parseCommand(text, now()));
+    }
+    const placeName = text
+      .replace(/^(?:please\s+)?(?:it(?: is|'s)\s+)?(?:at\s+|in\s+)?/i, '')
+      .replace(/[?.!]+$/g, '')
+      .trim();
+    if (!placeName) {
+      return { reply: `What's the location for ${event.title}?`, spoken: `What's the location for ${event.title}?`, followUp: true };
+    }
+    pending = null;
+    return act('location', event, { location: placeName });
   }
 
   async function finishChoice(text) {
@@ -84,7 +125,7 @@ export function createAssistant({ calendar, now = () => new Date() }) {
   async function run(command) {
     switch (command.intent) {
       case 'help':
-        return { reply: HELP, spoken: lines.help() };
+        return { reply: lines.help(), spoken: lines.help() };
       case 'list':
         return list(command);
       case 'next':
@@ -102,9 +143,15 @@ export function createAssistant({ calendar, now = () => new Date() }) {
       case 'notes':
       case 'duration':
       case 'open':
+      case 'clear':
+      case 'phone':
+      case 'remind':
+      case 'forget':
         return choose(command);
+      case 'question':
+        return question(command);
       default:
-        return { reply: `I didn't catch a calendar command. ${HELP}`, spoken: lines.missed() };
+        return { reply: lines.missed(), spoken: lines.missed() };
     }
   }
 
@@ -116,13 +163,20 @@ export function createAssistant({ calendar, now = () => new Date() }) {
         followUp: true,
       };
     }
-    const matches = findCandidates(await upcoming(), command.query, now());
+    const { matches, named, name, day } = lookupEvents(await upcoming(), command.query, now());
     if (!matches.length) {
-      return { reply: `I couldn't find “${command.query}” in the next 6 months.`, spoken: lines.notFound(command.query) };
+      if (day && named.length) {
+        const event = named[0];
+        const when = formatWhen(new Date(event.start), now());
+        const reply = `${event.title} is ${when}, not that day. I left it on the calendar.`;
+        return { reply, spoken: `${event.title} is ${whenSpoken(event.start, now())}. I left it on the calendar.` };
+      }
+      return { reply: `I couldn't find “${name || command.query}” in the next 6 months.`, spoken: lines.notFound(name || command.query) };
     }
-    if (matches.length > 1 && command.intent === 'cancel' && command.every) return cancelMany(matches);
+    const scoped = day ? { ...command, cancelInstance: true } : command;
+    if (matches.length > 1 && command.intent === 'cancel' && command.every) return cancelMany(matches, Boolean(day));
     if (matches.length > 1) {
-      pending = { type: 'choose', action: command.intent, command, matches };
+      pending = { type: 'choose', action: command.intent, command: scoped, matches };
       const choices = matches.slice(0, 4).map((event, index) => `${index + 1}, ${event.title} ${formatWhen(new Date(event.start), now())}`);
       const spokenChoices = matches.slice(0, 4).map((event, index) => `${index + 1}, ${event.title}, ${whenSpoken(event.start, now())}`);
       return {
@@ -131,13 +185,13 @@ export function createAssistant({ calendar, now = () => new Date() }) {
         followUp: true,
       };
     }
-    return act(command.intent, matches[0], command);
+    return act(command.intent, matches[0], scoped);
   }
 
-  async function cancelMany(matches) {
-    if (typeof calendar.removeMany === 'function') await calendar.removeMany(matches.map((event) => event.id));
+  async function cancelMany(matches, oneInstance) {
+    if (typeof calendar.removeMany === 'function' && !oneInstance) await calendar.removeMany(matches.map((event) => event.id));
     else {
-      for (const event of matches) await calendar.remove(event.id);
+      for (const event of matches) await calendar.remove(event.id, oneInstance ? event.start : undefined);
     }
     const title = matches[0].title;
     const sameName = matches.every((event) => event.title.toLowerCase() === title.toLowerCase());
@@ -154,7 +208,7 @@ export function createAssistant({ calendar, now = () => new Date() }) {
 
   async function act(action, event, command) {
     if (action === 'cancel') {
-      await calendar.remove(event.id);
+      await calendar.remove(event.id, command.cancelInstance ? event.start : undefined);
       return {
         reply: `Cancelled ${event.title} ${formatWhen(new Date(event.start), now())}.`,
         spoken: lines.cancelled(event.title, whenSpoken(event.start, now())),
@@ -174,13 +228,23 @@ export function createAssistant({ calendar, now = () => new Date() }) {
       if (!command.start) return { reply: `When should I move ${event.title}?`, spoken: lines.askMove(event.title), followUp: true };
       const previous = new Date(event.end) - new Date(event.start);
       const end = command.end ?? new Date(command.start.getTime() + previous);
-      const saved = await calendar.update(event.id, {
+      const patch = {
         start: command.start.toISOString(),
         end: end.toISOString(),
-      });
+      };
+      let placeNote = '';
+      if (command.location) {
+        const place = await resolvePlace(command.location);
+        patch.location = place.location;
+        if (place.phone) patch.phone = place.phone;
+        if (place.lookedUp) placeNote = ` The address is ${place.location}.`;
+        if (place.phone) placeNote += ` The phone number is ${place.phone}.`;
+      }
+      const saved = await calendar.update(event.id, patch);
+      const reply = `Moved ${saved.title} to ${formatWhen(new Date(saved.start), now())}.${placeNote}`;
       return {
-        reply: `Moved ${saved.title} to ${formatWhen(new Date(saved.start), now())}.`,
-        spoken: lines.moved(saved.title, whenSpoken(saved.start, now())),
+        reply,
+        spoken: `${lines.moved(saved.title, whenSpoken(saved.start, now()))}${placeNote}`,
         focusDate: new Date(saved.start),
         highlightId: saved.id,
       };
@@ -190,8 +254,43 @@ export function createAssistant({ calendar, now = () => new Date() }) {
       return { reply: `Renamed it to ${saved.title}.`, spoken: lines.renamed(saved.title), highlightId: saved.id, focusDate: new Date(saved.start) };
     }
     if (action === 'location') {
-      const saved = await calendar.update(event.id, { location: command.location });
-      return { reply: `Location for ${saved.title} is ${saved.location}.`, spoken: lines.location(saved.title, saved.location), highlightId: saved.id, focusDate: new Date(saved.start) };
+      if (!command.location) {
+        pending = { type: 'place', event };
+        const reply = `What's the location for ${event.title}?`;
+        return { reply, spoken: reply, followUp: true, highlightId: event.id, focusDate: new Date(event.start) };
+      }
+      const place = await resolvePlace(command.location);
+      const patch = { location: place.location };
+      if (place.phone) patch.phone = place.phone;
+      const saved = await calendar.update(event.id, patch);
+      let reply = `Location for ${saved.title} is ${saved.location}.`;
+      if (place.phone) reply += ` Phone ${place.phone}.`;
+      return { reply, spoken: reply, highlightId: saved.id, focusDate: new Date(saved.start) };
+    }
+    if (action === 'phone') {
+      const saved = await calendar.update(event.id, { phone: command.phone });
+      const reply = `The phone number for ${saved.title} is ${saved.phone || command.phone}.`;
+      return { reply, spoken: reply, highlightId: saved.id, focusDate: new Date(saved.start) };
+    }
+    if (action === 'clear') {
+      const patch = {};
+      if (command.field === 'phone') patch.phone = '';
+      else if (command.field === 'notes') patch.notes = '';
+      else patch.location = '';
+      const saved = await calendar.update(event.id, patch);
+      const label = command.field === 'notes' ? 'note' : command.field;
+      const reply = `I removed the ${label} from ${saved.title}.`;
+      return { reply, spoken: reply, highlightId: saved.id, focusDate: new Date(saved.start) };
+    }
+    if (action === 'remind') {
+      const saved = await calendar.update(event.id, { important: true });
+      const reply = `I'll remind you an hour before ${saved.title}, and the day before if it's later than that.`;
+      return { reply, spoken: reply, highlightId: saved.id, focusDate: new Date(saved.start) };
+    }
+    if (action === 'forget') {
+      const saved = await calendar.update(event.id, { important: false });
+      const reply = `I won't remind you about ${saved.title}.`;
+      return { reply, spoken: reply, highlightId: saved.id, focusDate: new Date(saved.start) };
     }
     if (action === 'notes') {
       const saved = await calendar.update(event.id, { notes: command.notes });
@@ -212,7 +311,7 @@ export function createAssistant({ calendar, now = () => new Date() }) {
         focusDate: new Date(saved.start),
       };
     }
-    return { reply: HELP, spoken: lines.help() };
+    return { reply: lines.help(), spoken: lines.help() };
   }
 
   async function undoLast() {
@@ -229,23 +328,71 @@ export function createAssistant({ calendar, now = () => new Date() }) {
     }
   }
 
+  async function resolvePlace(name) {
+    const place = String(name || '').trim();
+    if (!place || SKIP_PLACE.test(place) || /\d/.test(place)) return { location: place, phone: '', lookedUp: false };
+    try {
+      const found = await lookupPlace(place);
+      if (!found?.address) return { location: place, phone: '', lookedUp: false };
+      return { location: found.address, phone: found.phone || '', lookedUp: true };
+    } catch {
+      return { location: place, phone: '', lookedUp: false };
+    }
+  }
+
+  async function question(command) {
+    const about = String(command.query || '').match(/^(?:where(?:'s| is)|what(?:'s| is) the (?:address|phone number) (?:of|for))\s+(?:my\s+|the\s+)?(.+?)(?:\s+appointment)?$/i);
+    if (about) {
+      const matches = findCandidates(await upcoming(), about[1], now());
+      if (matches.length === 1) {
+        const event = matches[0];
+        const place = await resolvePlace(event.location || about[1]);
+        const location = place.location || event.location;
+        const phone = place.phone || event.phone || '';
+        if (place.lookedUp) {
+          await calendar.update(event.id, { location, phone });
+        }
+        let reply = location ? `${event.title} is at ${location}.` : `I don't have an address for ${event.title}.`;
+        if (phone) reply += ` Phone ${phone}.`;
+        return { reply, spoken: reply, focusDate: new Date(event.start), highlightId: event.id };
+      }
+    }
+    try {
+      const result = await ask(command.query);
+      const reply = result?.reply || "I couldn't find an answer for that.";
+      return { reply, spoken: result?.spoken || reply };
+    } catch {
+      return { reply: "I couldn't look that up.", spoken: "I couldn't look that up." };
+    }
+  }
+
   async function add(command) {
     const start = command.start;
     const end = command.end ?? addMinutes(start, command.durationMinutes || 60);
+    const place = await resolvePlace(command.location || '');
     const saved = await calendar.create({
       title: command.title || 'Appointment',
       start: start.toISOString(),
       end: end.toISOString(),
-      location: command.location || '',
+      location: place.location,
+      phone: place.phone,
       notes: '',
+      important: Boolean(command.important),
     });
     const overlap = (await upcoming()).find((event) => event.id !== saved.id && rangesOverlap(saved, event));
     let reply = `Added ${saved.title} ${formatWhen(new Date(saved.start), now())}.`;
     if (command.assumedTime) reply += ' I set it for 9 AM. Tell me if you want a different time.';
+    if (place.lookedUp) reply += ` The address is ${place.location}.`;
+    if (place.phone) reply += ` The phone number is ${place.phone}.`;
+    if (command.important) reply += ' I will remind you an hour before.';
     if (overlap) reply += ` That overlaps ${overlap.title}.`;
+    let spoken = lines.added(saved.title, whenSpoken(saved.start, now()), command.assumedTime, overlap?.title);
+    if (place.lookedUp) spoken += ` The address is ${place.location}.`;
+    if (place.phone) spoken += ` The phone number is ${place.phone}.`;
+    if (command.important) spoken += ' I will remind you an hour before.';
     return {
       reply,
-      spoken: lines.added(saved.title, whenSpoken(saved.start, now()), command.assumedTime, overlap?.title),
+      spoken,
       focusDate: new Date(saved.start),
       highlightId: saved.id,
     };

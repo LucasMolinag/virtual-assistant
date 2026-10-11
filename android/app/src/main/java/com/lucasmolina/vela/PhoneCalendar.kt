@@ -72,10 +72,12 @@ object PhoneCalendar {
             values.put(CalendarContract.Events.DTEND, Instant.parse(input.getString("end")).toEpochMilli())
             values.put(CalendarContract.Events.EVENT_TIMEZONE, zone.id)
             values.put(CalendarContract.Events.EVENT_LOCATION, input.optString("location"))
-            values.put(CalendarContract.Events.DESCRIPTION, input.optString("notes"))
+            values.put(CalendarContract.Events.DESCRIPTION, describe(input.optString("notes"), input.optString("phone"), input.optBoolean("important")))
             val uri = context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
                 ?: throw IllegalStateException("The phone calendar did not save that appointment.")
             val id = ContentUris.parseId(uri)
+            val start = Instant.parse(input.getString("start")).toEpochMilli()
+            AppointmentReminders.sync(context, id, input.optString("title", "Appointment"), start, input.optBoolean("important"))
             VelaWidgetProvider.updateAll(context)
             JSONObject().put("event", readEvent(context, id))
         }
@@ -85,10 +87,16 @@ object PhoneCalendar {
         return guard {
             val eventId = id.toLong()
             val patch = JSONObject(json)
+            val current = readEvent(context, eventId)
             val values = ContentValues()
             if (patch.has("title") && !patch.isNull("title")) values.put(CalendarContract.Events.TITLE, patch.getString("title"))
             if (patch.has("location") && !patch.isNull("location")) values.put(CalendarContract.Events.EVENT_LOCATION, patch.getString("location"))
-            if (patch.has("notes") && !patch.isNull("notes")) values.put(CalendarContract.Events.DESCRIPTION, patch.getString("notes"))
+            if (patch.has("notes") || patch.has("phone") || patch.has("important")) {
+                val notes = if (patch.has("notes") && !patch.isNull("notes")) patch.getString("notes") else current.optString("notes")
+                val phone = if (patch.has("phone") && !patch.isNull("phone")) patch.getString("phone") else current.optString("phone")
+                val important = if (patch.has("important")) patch.optBoolean("important") else current.optBoolean("important")
+                values.put(CalendarContract.Events.DESCRIPTION, describe(notes, phone, important))
+            }
             if (patch.has("start") && !patch.isNull("start")) {
                 values.put(CalendarContract.Events.DTSTART, Instant.parse(patch.getString("start")).toEpochMilli())
                 values.put(CalendarContract.Events.EVENT_TIMEZONE, zone.id)
@@ -100,19 +108,46 @@ object PhoneCalendar {
                 val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
                 context.contentResolver.update(uri, values, null, null)
             }
+            val saved = readEvent(context, eventId)
+            val startMillis = Instant.parse(saved.getString("start")).toEpochMilli()
+            AppointmentReminders.sync(context, eventId, saved.optString("title"), startMillis, saved.optBoolean("important") || patch.optBoolean("important"))
             VelaWidgetProvider.updateAll(context)
-            JSONObject().put("event", readEvent(context, eventId))
+            JSONObject().put("event", saved)
         }
     }
 
-    fun remove(context: Context, id: String): String {
+    fun remove(context: Context, id: String, startIso: String = ""): String {
         return guard {
-            val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, id.toLong())
+            val eventId = id.toLong()
+            if (startIso.isNotBlank() && isRecurring(context, eventId)) {
+                val values = ContentValues()
+                values.put(CalendarContract.Events.ORIGINAL_INSTANCE_TIME, Instant.parse(startIso).toEpochMilli())
+                values.put(CalendarContract.Events.STATUS, CalendarContract.Events.STATUS_CANCELED)
+                val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_EXCEPTION_URI, eventId)
+                context.contentResolver.insert(uri, values)
+                    ?: throw IllegalStateException("That occurrence could not be cancelled.")
+                VelaWidgetProvider.updateAll(context)
+                return@guard JSONObject()
+            }
+            val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
             val deleted = context.contentResolver.delete(uri, null, null)
             if (deleted == 0) throw IllegalStateException("That appointment could not be deleted from this calendar.")
+            AppointmentReminders.cancel(context, eventId)
             VelaWidgetProvider.updateAll(context)
             JSONObject()
         }
+    }
+
+    private fun isRecurring(context: Context, eventId: Long): Boolean {
+        val uri = ContentUris.withAppendedId(CalendarContract.Events.CONTENT_URI, eventId)
+        val projection = arrayOf(CalendarContract.Events.RRULE, CalendarContract.Events.RDATE)
+        context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+            if (!cursor.moveToFirst()) return false
+            val rule = cursor.getString(0)
+            val dates = cursor.getString(1)
+            return !rule.isNullOrBlank() || !dates.isNullOrBlank()
+        }
+        return false
     }
 
     private fun queryInstances(context: Context, start: Long, end: Long): List<JSONObject> {
@@ -213,8 +248,11 @@ object PhoneCalendar {
         event.put("title", title.ifBlank { "Untitled" })
         event.put("allDay", allDay)
         event.put("holiday", holiday)
+        val details = splitDetails(notes)
         event.put("location", location ?: "")
-        event.put("notes", notes ?: "")
+        event.put("notes", details.notes)
+        event.put("phone", details.phone)
+        event.put("important", details.important)
         event.put("htmlLink", "")
         if (allDay) {
             event.put("start", startOfUtcDate(start))
@@ -229,6 +267,33 @@ object PhoneCalendar {
     private fun startOfUtcDate(millis: Long): String {
         val date = Instant.ofEpochMilli(millis).atZone(ZoneOffset.UTC).toLocalDate()
         return date.atStartOfDay(zone).toInstant().toString()
+    }
+
+    private data class Details(val notes: String, val phone: String, val important: Boolean)
+
+    private fun describe(notes: String?, phone: String?, important: Boolean): String {
+        return buildString {
+            val body = notes.orEmpty().trim()
+            if (body.isNotEmpty()) append(body)
+            val number = phone.orEmpty().trim()
+            if (number.isNotEmpty()) {
+                if (isNotEmpty()) append('\n')
+                append("Phone: ").append(number)
+            }
+            if (important) {
+                if (isNotEmpty()) append('\n')
+                append("Remind: yes")
+            }
+        }
+    }
+
+    private fun splitDetails(raw: String?): Details {
+        var text = raw.orEmpty()
+        val phone = Regex("(?m)^Phone:\\s*(.*)$").find(text)?.groupValues?.get(1)?.trim().orEmpty()
+        val important = Regex("(?m)^Remind:\\s*yes\\s*$").containsMatchIn(text)
+        text = Regex("(?m)^Phone:\\s*.*$").replace(text, "")
+        text = Regex("(?m)^Remind:\\s*yes\\s*$").replace(text, "")
+        return Details(text.trim(), phone, important)
     }
 
     private fun duplicateKey(event: JSONObject): String {

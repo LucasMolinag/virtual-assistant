@@ -158,7 +158,15 @@ export function createCalendar() {
     const body = {};
     if (event.title != null) body.summary = event.title;
     if (event.location != null) body.location = event.location;
-    if (event.notes != null) body.description = event.notes;
+    if (event.notes != null || event.phone != null || event.important != null) {
+      const notes = event.notes || '';
+      const phone = event.phone ? `\nPhone: ${event.phone}` : '';
+      const remind = event.important ? '\nRemind: yes' : '';
+      body.description = `${notes}${phone}${remind}`.trim();
+    }
+    if (event.important) {
+      body.reminders = { useDefault: false, overrides: [{ method: 'popup', minutes: 60 }, { method: 'popup', minutes: 24 * 60 }] };
+    }
     if (event.start) body.start = { dateTime: formatLocalDateTime(event.start), timeZone };
     if (event.end) body.end = { dateTime: formatLocalDateTime(event.end), timeZone };
     return body;
@@ -236,8 +244,42 @@ export function createCalendar() {
       allDay: Boolean(event.allDay),
       location: event.location || '',
       notes: event.notes || '',
+      phone: event.phone || '',
+      important: Boolean(event.important),
       htmlLink: event.htmlLink || '',
     };
+  }
+
+  function writeUndo(record) {
+    undoRecord = record;
+    const json = record ? JSON.stringify(record) : '';
+    try {
+      localStorage.setItem('vela-undo', json);
+    } catch {
+      /* the page can still undo until it reloads */
+    }
+    if (hasNative() && typeof window.VellaNative.saveUndo === 'function') window.VellaNative.saveUndo(json);
+  }
+
+  function readUndo() {
+    let json = '';
+    if (hasNative() && typeof window.VellaNative.loadUndo === 'function') json = window.VellaNative.loadUndo() || '';
+    if (!json) {
+      try {
+        json = localStorage.getItem('vela-undo') || '';
+      } catch {
+        json = '';
+      }
+    }
+    if (!json) {
+      undoRecord = null;
+      return;
+    }
+    try {
+      undoRecord = JSON.parse(json);
+    } catch {
+      undoRecord = null;
+    }
   }
 
   async function findStored(id) {
@@ -268,6 +310,8 @@ export function createCalendar() {
       end: new Date(input.end).toISOString(),
       location: input.location || '',
       notes: input.notes || '',
+      phone: input.phone || '',
+      important: Boolean(input.important),
       allDay: false,
     };
     if (hasNative()) return readNative(window.VellaNative.create(JSON.stringify(event))).event;
@@ -297,15 +341,17 @@ export function createCalendar() {
     if (patch.title != null) next.title = patch.title;
     if (patch.location != null) next.location = patch.location;
     if (patch.notes != null) next.notes = patch.notes;
+    if (patch.phone != null) next.phone = patch.phone;
+    if (patch.important != null) next.important = Boolean(patch.important);
     if (patch.start) next.start = new Date(patch.start).toISOString();
     if (patch.end) next.end = new Date(patch.end).toISOString();
     return localPut(next);
   }
 
-  async function removeStored(id) {
+  async function removeStored(id, start = '') {
     invalidate();
     if (hasNative()) {
-      readNative(window.VellaNative.remove(String(id)));
+      readNative(window.VellaNative.remove(String(id), String(start || '')));
       return;
     }
     if (connected()) {
@@ -314,6 +360,8 @@ export function createCalendar() {
     }
     await localDelete(id);
   }
+
+  readUndo();
 
   return {
     settings: readSettings,
@@ -388,21 +436,27 @@ export function createCalendar() {
     canUndo() {
       return Boolean(undoRecord);
     },
+    reloadUndo() {
+      readUndo();
+    },
+    invalidateCache() {
+      invalidate();
+    },
     async create(input) {
       const saved = await createStored(input);
-      undoRecord = { type: 'create', event: copyEvent(saved) };
+      writeUndo({ type: 'create', event: copyEvent(saved) });
       return saved;
     },
     async update(id, patch) {
       const before = await findStored(id);
       const saved = await updateStored(id, patch);
-      if (before) undoRecord = { type: 'update', event: copyEvent(before) };
+      if (before) writeUndo({ type: 'update', event: copyEvent(before) });
       return saved;
     },
-    async remove(id) {
+    async remove(id, start) {
       const before = await findStored(id);
-      await removeStored(id);
-      if (before) undoRecord = { type: 'delete', event: copyEvent(before) };
+      await removeStored(id, start || '');
+      if (before) writeUndo({ type: 'delete', event: copyEvent(before) });
     },
     async removeMany(ids) {
       const events = [];
@@ -411,13 +465,14 @@ export function createCalendar() {
         await removeStored(id);
         if (before) events.push(copyEvent(before));
       }
-      if (events.length === 1) undoRecord = { type: 'delete', event: events[0] };
-      else if (events.length) undoRecord = { type: 'delete-many', events };
+      if (events.length === 1) writeUndo({ type: 'delete', event: events[0] });
+      else if (events.length) writeUndo({ type: 'delete-many', events });
     },
     async undo() {
+      readUndo();
       const record = undoRecord;
       if (!record) throw fail('Nothing to undo.', 'undo');
-      undoRecord = null;
+      writeUndo(null);
       if (record.type === 'create') {
         await removeStored(record.event.id);
         return { message: `Undone. I removed ${record.event.title}.`, focusDate: record.event.start };
@@ -442,6 +497,8 @@ export function createCalendar() {
         title: record.event.title,
         location: record.event.location,
         notes: record.event.notes,
+        phone: record.event.phone,
+        important: record.event.important,
         start: record.event.start,
         end: record.event.end,
       });

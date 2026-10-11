@@ -24,6 +24,8 @@ function memoryCalendar(seed = []) {
       if (patch.title != null) event.title = patch.title;
       if (patch.location != null) event.location = patch.location;
       if (patch.notes != null) event.notes = patch.notes;
+      if (patch.phone != null) event.phone = patch.phone;
+      if (patch.important != null) event.important = patch.important;
       if (patch.start) event.start = patch.start;
       if (patch.end) event.end = patch.end;
       return event;
@@ -177,10 +179,23 @@ test('asks which appointment, then edits the one you pick', async () => {
   const assistant = createAssistant({ calendar, now });
   const ask = await assistant.handle('rename dentist to Dental checkup');
   assert.match(ask.reply, /Say a number/);
-  const done = await assistant.handle('2');
+  const done = await assistant.handle('the second one');
   assert.match(done.reply, /Dental checkup/);
   assert.equal(calendar.all().find((event) => event.id === 'b').title, 'Dental checkup');
   assert.equal(calendar.all().find((event) => event.id === 'a').title, 'Dentist');
+});
+
+test('hears a spoken two as the second choice', async () => {
+  const calendar = memoryCalendar([
+    { id: 'a', title: 'Dentist', start: new Date(2026, 9, 10, 15).toISOString(), end: new Date(2026, 9, 10, 16).toISOString() },
+    { id: 'b', title: 'Dentist', start: new Date(2026, 9, 16, 9).toISOString(), end: new Date(2026, 9, 16, 10).toISOString() },
+  ]);
+  const assistant = createAssistant({ calendar, now });
+  await assistant.handle('cancel dentist');
+  const done = await assistant.handle('to');
+  assert.match(done.reply, /Cancelled Dentist/);
+  assert.equal(calendar.all().length, 1);
+  assert.equal(calendar.all()[0].id, 'a');
 });
 
 test('accepts the time as a follow-up', async () => {
@@ -193,4 +208,82 @@ test('accepts the time as a follow-up', async () => {
   const start = new Date(calendar.all()[0].start);
   assert.equal(start.getDate(), 20);
   assert.equal(start.getHours(), 9);
+});
+
+test('changes and clears details on an existing appointment', async () => {
+  const calendar = memoryCalendar([
+    { id: '1', title: 'Dentist', start: new Date(2026, 9, 10, 15).toISOString(), end: new Date(2026, 9, 10, 16).toISOString(), location: 'Clinic' },
+  ]);
+  const assistant = createAssistant({ calendar, now, lookupPlace: async () => null });
+  const phone = await assistant.handle('set the phone number of dentist to 555-0100');
+  assert.match(phone.reply, /555-0100/);
+  assert.equal(calendar.all()[0].phone, '555-0100');
+  const cleared = await assistant.handle('remove the location from dentist');
+  assert.match(cleared.reply, /removed the location/i);
+  assert.equal(calendar.all()[0].location, '');
+  const reminded = await assistant.handle('remind me about dentist');
+  assert.match(reminded.reply, /remind you/i);
+  assert.equal(calendar.all()[0].important, true);
+});
+
+test('looks up a place name and answers a question', async () => {
+  const calendar = memoryCalendar();
+  const assistant = createAssistant({
+    calendar,
+    now,
+    lookupPlace: async () => ({ address: '12 Market Street', phone: '555-0199' }),
+    ask: async () => ({ reply: 'Paris is the capital of France.', spoken: 'Paris is the capital of France.' }),
+  });
+  const added = await assistant.handle('add dentist tomorrow at 3pm at the clinic');
+  assert.match(added.reply, /12 Market Street/);
+  assert.match(added.reply, /555-0199/);
+  assert.equal(calendar.all()[0].location, '12 Market Street');
+  const answer = await assistant.handle('what is the capital of France');
+  assert.match(answer.reply, /Paris/);
+});
+
+test('cancels the lunch on the day you name', async () => {
+  const calendar = memoryCalendar([
+    { id: '1', title: 'Lunch', start: new Date(2026, 9, 10, 12).toISOString(), end: new Date(2026, 9, 10, 13).toISOString() },
+    { id: '2', title: 'Lunch', start: new Date(2026, 9, 12, 12).toISOString(), end: new Date(2026, 9, 12, 13).toISOString() },
+  ]);
+  const assistant = createAssistant({ calendar, now });
+  const cancelled = await assistant.handle('cancel Lunch tomorrow');
+  assert.match(cancelled.reply, /Cancelled Lunch/);
+  assert.match(cancelled.reply, /tomorrow/i);
+  assert.deepEqual(calendar.all().map((event) => event.id), ['2']);
+  const later = await assistant.handle("cancel tomorrow's lunch");
+  assert.match(later.reply, /Monday/);
+  assert.match(later.reply, /left it/i);
+  assert.deepEqual(calendar.all().map((event) => event.id), ['2']);
+});
+
+test('keeps a missed command short and explains what she can do', async () => {
+  const assistant = createAssistant({ calendar: memoryCalendar(), now });
+  const missed = await assistant.handle('blah blah blah');
+  assert.equal(missed.spoken, "I didn't catch a command.");
+  assert.equal(missed.reply, missed.spoken);
+  const help = await assistant.handle('what can you do?');
+  assert.match(help.spoken, /add, move, rename, and cancel/);
+  assert.match(help.spoken, /reminder/);
+  assert.equal(help.reply, help.spoken);
+});
+
+test('asks which place to add when the location was left out', async () => {
+  const calendar = memoryCalendar([
+    { id: '1', title: 'Lunch', start: new Date(2026, 9, 10, 12).toISOString(), end: new Date(2026, 9, 10, 13).toISOString() },
+    { id: '2', title: 'Lunch', start: new Date(2026, 9, 9, 12).toISOString(), end: new Date(2026, 9, 9, 13).toISOString() },
+  ]);
+  const assistant = createAssistant({
+    calendar,
+    now,
+    lookupPlace: async () => ({ address: '1 King Street, Toronto', phone: '416-555-0100' }),
+  });
+  const asked = await assistant.handle('add location to lunch tomorrow');
+  assert.equal(asked.followUp, true);
+  assert.match(asked.spoken, /What's the location for Lunch/i);
+  const saved = await assistant.handle('at the diner');
+  assert.match(saved.reply, /1 King Street, Toronto/);
+  assert.equal(calendar.all().find((event) => event.id === '1').location, '1 King Street, Toronto');
+  assert.equal(calendar.all().find((event) => event.id === '2').location, '');
 });

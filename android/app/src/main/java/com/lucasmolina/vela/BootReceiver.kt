@@ -1,0 +1,13 @@
+package com.lucasmolina.vela
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        AppointmentReminders.restore(context)
+        if (WakeService.enabled(context)) WakeService.start(context)
+    }
+}

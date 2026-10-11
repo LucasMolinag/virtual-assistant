@@ -102,6 +102,11 @@
           <label>Until <input id="event-end" type="time" required /></label>
         </div>
         <label>Location <input id="event-location" /></label>
+        <label>Phone <input id="event-phone" type="tel" /></label>
+        <label class="check">
+          <input id="event-important" type="checkbox" />
+          Important, remind me before it starts
+        </label>
         <label>Notes <textarea id="event-notes" rows="3"></textarea></label>
         <p id="event-error" class="form-error" hidden></p>
         <div class="form-actions">
@@ -123,6 +128,10 @@
         <label class="check">
           <input id="speak-toggle" type="checkbox" checked />
           Speak replies out loud
+        </label>
+        <label class="check" id="wake-row" hidden>
+          <input id="wake-toggle" type="checkbox" />
+          Listen for “Hey Vella”
         </label>
         <p>Talk to her in English. She reads the reply out loud with English voice 3. Say “undo” or tap Undo to reverse the last change.</p>
         <section class="setup" id="google-setup">

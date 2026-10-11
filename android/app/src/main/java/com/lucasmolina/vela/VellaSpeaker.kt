@@ -8,7 +8,9 @@ import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
+import java.util.Collections
 import java.util.Locale
+import java.util.WeakHashMap
 
 class VellaSpeaker(
     context: Context,
@@ -33,6 +35,7 @@ class VellaSpeaker(
         } else {
             tts = TextToSpeech(appContext, listener)
         }
+        register(this)
     }
 
     fun speak(text: String) {
@@ -54,6 +57,7 @@ class VellaSpeaker(
     }
 
     fun shutdown() {
+        unregister(this)
         tts?.stop()
         tts?.shutdown()
         tts = null
@@ -177,5 +181,19 @@ class VellaSpeaker(
 
     companion object {
         private const val GOOGLE_TTS = "com.google.android.tts"
+        private val speakers = Collections.newSetFromMap(WeakHashMap<VellaSpeaker, Boolean>())
+
+        private fun register(speaker: VellaSpeaker) {
+            synchronized(speakers) { speakers.add(speaker) }
+        }
+
+        private fun unregister(speaker: VellaSpeaker) {
+            synchronized(speakers) { speakers.remove(speaker) }
+        }
+
+        fun interruptAll() {
+            val current = synchronized(speakers) { speakers.toList() }
+            current.forEach { it.stop() }
+        }
     }
 }

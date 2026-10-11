@@ -13,6 +13,9 @@ function blank(raw) {
     end: null,
     location: null,
     notes: null,
+    phone: null,
+    field: null,
+    important: false,
     durationMinutes: null,
     durationMode: null,
     assumedTime: false,
@@ -187,6 +190,10 @@ function extractLocation(before, after) {
 
 function parseAdd(text, now, raw) {
   let body = text.replace(/^(?:please\s+)?(?:add|schedule|create|book|set up|setup|put|new)\b\s*/i, '');
+  const important = /\b(?:important|remind me|don'?t forget|do not forget)\b/i.test(text);
+  body = body.replace(/\b(?:an?\s+)?important\b/ig, ' ');
+  body = body.replace(/\b(?:remind me|don'?t forget|do not forget)\b/ig, ' ');
+  body = body.replace(/^(?:an?\s+)/i, '');
   body = body.replace(/^(?:an?\s+)?(?:appointment|meeting|event)\s+(?:called|named)\s+/i, '');
   const duration = extractDuration(body);
   const when = extractWhen(duration.text, now);
@@ -204,7 +211,55 @@ function parseAdd(text, now, raw) {
     location: located.location,
     durationMinutes: duration.minutes,
     assumedTime: when.assumedTime,
+    important,
   });
+}
+
+function fieldName(word) {
+  if (/^phone/i.test(word)) return 'phone';
+  if (/^note/i.test(word)) return 'notes';
+  return 'location';
+}
+
+function parseEdit(text, now, raw) {
+  const clear = text.match(/^(?:please\s+)?(?:remove|clear|delete|drop)\s+(?:the\s+)?(location|address|notes?|phone(?:\s+number)?)\s+(?:from|of|on|for)\s+(.+)$/i);
+  if (clear) return command(raw, { intent: 'clear', field: fieldName(clear[1]), query: cleanQuery(clear[2]) });
+
+  const phoneOf = text.match(/^(?:please\s+)?(?:set|change|update|add)\s+(?:the\s+)?phone(?:\s+number)?\s+(?:of|for|on)\s+(.+?)\s+to\s+(.+)$/i);
+  if (phoneOf) return command(raw, { intent: 'phone', query: cleanQuery(phoneOf[1]), phone: phoneOf[2].trim() });
+  const phoneAdd = text.match(/^(?:please\s+)?add\s+(?:a\s+)?phone(?:\s+number)?\s+(.+?)\s+(?:to|for|on)\s+(.+)$/i);
+  if (phoneAdd) return command(raw, { intent: 'phone', query: cleanQuery(phoneAdd[2]), phone: phoneAdd[1].trim() });
+
+  const askPlace = text.match(/^(?:please\s+)?add\s+(?:a\s+|the\s+)?(?:location|address)\s+(?:to|for|on)\s+(.+)$/i);
+  if (askPlace) return command(raw, { intent: 'location', query: cleanQuery(askPlace[1]), location: '' });
+  const addPlace = text.match(/^(?:please\s+)?add\s+(?:the\s+)?(?:location|address)\s+(.+?)\s+(?:to|for|on)\s+(.+)$/i);
+  if (addPlace) return command(raw, { intent: 'location', query: cleanQuery(addPlace[2]), location: addPlace[1].trim() });
+
+  const changeTime = text.match(/^(?:please\s+)?(?:change|update|set)\s+(?:the\s+)?(?:time|date|day)\s+(?:of|for)\s+(.+?)\s+to\s+(.+)$/i);
+  if (changeTime) {
+    const when = parseWhen(changeTime[2], now);
+    if (when.start) {
+      return command(raw, {
+        intent: 'move',
+        query: cleanQuery(changeTime[1]),
+        start: when.start,
+        end: when.end,
+        assumedTime: when.assumedTime,
+      });
+    }
+  }
+
+  const forget = text.match(/^(?:please\s+)?don'?t remind me(?:\s+about|\s+of)?\s+(.+)$/i);
+  if (forget) return command(raw, { intent: 'forget', query: cleanQuery(forget[1]) });
+  const remind = text.match(/^(?:please\s+)?remind me(?:\s+about|\s+of)?\s+(.+)$/i);
+  if (remind) return command(raw, { intent: 'remind', query: cleanQuery(remind[1]) });
+  const important = text.match(/^(?:please\s+)?(?:make|mark)\s+(.+?)\s+important$/i);
+  if (important) return command(raw, { intent: 'remind', query: cleanQuery(important[1]) });
+  return null;
+}
+
+function isQuestion(text) {
+  return /^(?:please\s+)?(?:who|what|when|where|why|how|google|search(?:\s+for)?|look up|find)\b/i.test(text);
 }
 
 function rangeFrom(text, now) {
@@ -280,7 +335,8 @@ function toEnglishCommand(text) {
   t = t.replace(/^(?:por favor[, ]+)?(?:renomeia|renomear)\s+(.+?)\s+(?:pra|para|pro)\s+/iu, 'rename $1 to ');
   t = t.replace(/^(?:por favor[, ]+)?(?:muda|mudar|move|mover|remarca|remarcar|passa|passar)\s+(.+?)\s+(?:pra|para|pro)\s+/iu, 'move $1 to ');
   t = t.replace(/^(?:por favor[, ]+)?(?:marca|marcar|adicione|adiciona|adicionar|coloca|colocar|bota|botar|agenda|agendar|cria|criar)\b/iu, 'add');
-  t = t.replace(/^(?:por favor[, ]+)?(?:cancela|cancelar|apaga|apagar|remove|remover|tira|tirar|deleta|deletar)\b/iu, 'cancel');
+  t = t.replace(/^(?:por favor[, ]+)?(?:cancela|cancelar|apaga|apagar|remover|tira|tirar|deleta|deletar)\b/iu, 'cancel');
+  t = t.replace(/^(?:por favor[, ]+)?remove\b(?!\s+(?:the\s+)?(?:location|address|notes?|phone)\b)/iu, 'cancel');
   t = t.replace(/^(?:por favor[, ]+)?(?:abre|abrir|edita|editar)\b/iu, 'open');
   t = translateWords(t);
   return t.replace(/\s+/g, ' ').trim();
@@ -427,12 +483,15 @@ export function parseCommand(input, now = new Date()) {
   const text = raw.replace(/[?.!]+$/g, '').trim();
   if (!text) return command(raw, { intent: 'unknown' });
 
-  if (/^(?:help|commands)$/i.test(text) || /what can you do/i.test(text)) {
+  if (/^(?:please\s+)?(?:help|commands|what can i say|what can i ask(?: you)?)$/i.test(text)
+    || /\b(?:what can you do|what do you do|what are you able to do|what can you help(?: me)? with|how can you help)\b/i.test(text)) {
     return command(raw, { intent: 'help' });
   }
   if (/^(?:please\s+)?(?:undo(?:\s+that)?|take that back)$/i.test(text)) {
     return command(raw, { intent: 'undo' });
   }
+  const edit = parseEdit(text, now, raw);
+  if (edit) return edit;
   if (/what(?:'s| is) next|what do i have next|next appointment|what(?:'s| is) coming up|whats next/i.test(text)) {
     return command(raw, { intent: 'next' });
   }
@@ -501,13 +560,15 @@ export function parseCommand(input, now = new Date()) {
 
   const changeTo = text.match(/^(?:please\s+)?(?:change|update)\s+(.+?)\s+\bto\b\s+(.+)$/i);
   if (changeTo && !/^location\b/i.test(changeTo[1])) {
-    const when = parseWhen(changeTo[2], now);
+    const when = extractWhen(changeTo[2], now);
+    const located = extractLocation('', when.after);
     if (when.start) {
       return command(raw, {
         intent: 'move',
         query: cleanQuery(changeTo[1]),
         start: when.start,
         end: when.end,
+        location: located.location,
         assumedTime: when.assumedTime,
       });
     }
@@ -521,25 +582,92 @@ export function parseCommand(input, now = new Date()) {
     const query = cleanQuery(text.replace(/^(?:please\s+)?(?:edit|open)\b\s*/i, ''));
     return command(raw, { intent: 'open', query });
   }
+  if (isQuestion(text)) return command(raw, { intent: 'question', query: text });
   return command(raw, { intent: 'unknown' });
 }
 
 export function numberFrom(text) {
-  const t = text.trim().toLowerCase();
-  const digit = t.match(/^(?:number\s+|the\s+|n[uú]mero\s+|o\s+)?(\d+)$/u);
-  if (digit) return Number(digit[1]);
-  const words = {
-    one: 1, two: 2, three: 3, four: 4, five: 5,
+  const tokens = String(text || '').trim().toLowerCase().replace(/[?.!,#]/g, '').split(/\s+/).filter(Boolean);
+  if (!tokens.length) return null;
+  const ordinals = {
     first: 1, second: 2, third: 3, fourth: 4, fifth: 5,
-    um: 1, dois: 2, tres: 3, três: 3, quatro: 4, cinco: 5,
     primeiro: 1, segundo: 2, terceiro: 3, quarto: 4, quinto: 5,
   };
-  const word = t.match(/^(?:the\s+|o\s+|a\s+|n[uú]mero\s+)?(one|two|three|four|five|first|second|third|fourth|fifth|um|dois|tres|três|quatro|cinco|primeiro|segundo|terceiro|quarto|quinto)$/u);
-  return word ? words[word[1]] : null;
+  const cardinals = {
+    one: 1, won: 1, two: 2, to: 2, too: 2, tu: 2, three: 3, tree: 3,
+    four: 4, for: 4, fore: 4, five: 5,
+    um: 1, dois: 2, tres: 3, três: 3, quatro: 4, cinco: 5,
+  };
+  const fillers = new Set([
+    'please', 'the', 'a', 'an', 'number', 'numero', 'número', 'option', 'choice',
+    'pick', 'select', 'go', 'with', 'i', 'want', 'its', "it's", 'it', 'is', 'appointment', 'no',
+  ]);
+  const extra = tokens.filter((token) => (
+    !fillers.has(token) && ordinals[token] == null && cardinals[token] == null && !/^\d+$/.test(token)
+  ));
+  if (extra.length) return null;
+  const ordinal = tokens.find((token) => ordinals[token] != null);
+  if (ordinal) return ordinals[ordinal];
+  const number = tokens.find((token) => cardinals[token] != null || /^\d+$/.test(token));
+  if (!number) return null;
+  if (/^\d+$/.test(number)) return Number(number);
+  return cardinals[number];
 }
 
-export function findCandidates(events, query, now = new Date()) {
-  const q = (query || '').toLowerCase().replace(/[?.!]/g, '').replace(/\s+/g, ' ').trim();
+function nameAndDay(query, now) {
+  const q = String(query || '').replace(/\s+/g, ' ').trim();
+  const dayWord = "(?:today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(?:this|next)\\s+(?:week|monday|tuesday|wednesday|thursday|friday|saturday|sunday))";
+  const leading = q.match(new RegExp(`^(?:(?:on|for)\\s+)?(${dayWord})(?:'s)?\\s+(.+)$`, 'i'));
+  if (leading?.[2]?.trim()) {
+    const when = chrono.parse(leading[1].replace(/'s$/i, ''), now, { forwardDate: true })[0];
+    if (when?.start && (when.start.isCertain('day') || when.start.isCertain('weekday'))) {
+      return { name: leading[2].trim(), day: when.start.date() };
+    }
+  }
+  const trailing = q.match(new RegExp(`^(.*\\S)\\s+(?:(?:on|for)\\s+)?(${dayWord})$`, 'i'));
+  if (trailing) {
+    const when = chrono.parse(trailing[2], now, { forwardDate: true })[0];
+    if (when?.start && (when.start.isCertain('day') || when.start.isCertain('weekday'))) {
+      return { name: trailing[1].trim(), day: when.start.date() };
+    }
+  }
+  const dayHit = chrono.parse(q, now, { forwardDate: true }).find((result) => (
+    new RegExp(`\\b${dayWord}\\b`, 'i').test(result.text)
+    && (result.start?.isCertain('day') || result.start?.isCertain('weekday'))
+  ));
+  if (dayHit && dayHit.text) {
+    const name = `${q.slice(0, dayHit.index)} ${q.slice(dayHit.index + dayHit.text.length)}`
+      .replace(/\s+(?:on|for)\s*$/i, '')
+      .replace(/^\s*(?:on|for)\s+/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (name) return { name, day: dayHit.start.date() };
+  }
+  return { name: q, day: null };
+}
+
+function coversDay(event, day) {
+  const start = new Date(event.start);
+  const end = new Date(event.end || event.start);
+  const dayStart = new Date(day);
+  dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
+  if (end > start && start < dayEnd && end > dayStart) return true;
+  const sameLocal = start.getFullYear() === dayStart.getFullYear()
+    && start.getMonth() === dayStart.getMonth()
+    && start.getDate() === dayStart.getDate();
+  if (sameLocal) return true;
+  if (event.allDay || /T00:00:00(?:\.000)?Z$/i.test(String(event.start))) {
+    return start.getUTCFullYear() === dayStart.getFullYear()
+      && start.getUTCMonth() === dayStart.getMonth()
+      && start.getUTCDate() === dayStart.getDate();
+  }
+  return false;
+}
+
+function rankByName(events, name, now) {
+  const q = String(name || '').toLowerCase().replace(/[?.!,]/g, '').replace(/\s+/g, ' ').trim();
   if (!q) return [];
   const when = chrono.parse(q, now, { forwardDate: true })[0];
   let time = null;
@@ -550,11 +678,12 @@ export function findCandidates(events, query, now = new Date()) {
     const title = event.title.toLowerCase();
     let score = 0;
     if (title === q) score = 100;
-    else if (title.length > 2 && (q.includes(title) || title.includes(q))) score = 80;
     else if (words.length) {
-      const hits = words.filter((word) => titleForms(word).some((form) => title.includes(form))).length;
-      if (hits === words.length) score = 65;
-      else if (hits) score = hits * 20;
+      const hits = words.filter((word) => titleForms(word).some((form) => (
+        new RegExp(`(?:^|\\s)${form}(?:\\s|$)`, 'i').test(title)
+      ))).length;
+      if (hits === words.length) score = 70;
+      else if (hits) score = hits * 25;
     }
     if (time) {
       const start = new Date(event.start);
@@ -566,4 +695,15 @@ export function findCandidates(events, query, now = new Date()) {
   if (!scored.length) return [];
   const top = scored[0].score;
   return scored.filter((item) => item.score >= top - 5).map((item) => item.event);
+}
+
+export function lookupEvents(events, query, now = new Date()) {
+  const { name, day } = nameAndDay(query, now);
+  const named = rankByName(events, name, now);
+  const matches = day ? named.filter((event) => coversDay(event, day)) : named;
+  return { name, day, matches, named };
+}
+
+export function findCandidates(events, query, now = new Date()) {
+  return lookupEvents(events, query, now).matches;
 }

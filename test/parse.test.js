@@ -167,3 +167,32 @@ test('finds every appointment that shares a name', () => {
   const matches = findCandidates(events, 'dentist', now);
   assert.deepEqual(matches.map((event) => event.id), ['1', '2']);
 });
+
+test('edits, clears, and marks an appointment important', () => {
+  const clear = parseCommand('remove the location from dentist', now);
+  assert.equal(clear.intent, 'clear');
+  assert.equal(clear.field, 'location');
+  assert.equal(clear.query, 'dentist');
+
+  const phone = parseCommand('add the phone number of dentist to 555-0100', now);
+  assert.equal(phone.intent, 'phone');
+  assert.equal(phone.query, 'dentist');
+  assert.equal(phone.phone, '555-0100');
+
+  const time = parseCommand('change the time of dentist to Friday at 4', now);
+  assert.equal(time.intent, 'move');
+  assert.equal(time.start.getHours(), 16);
+
+  const important = parseCommand('add an important dentist tomorrow at 3pm', now);
+  assert.equal(important.intent, 'add');
+  assert.equal(important.title, 'Dentist');
+  assert.equal(important.important, true);
+
+  const question = parseCommand('where is Costco', now);
+  assert.equal(question.intent, 'question');
+
+  const askLocation = parseCommand('add location to lunch tomorrow', now);
+  assert.equal(askLocation.intent, 'location');
+  assert.equal(askLocation.location, '');
+  assert.equal(askLocation.query, 'lunch tomorrow');
+});

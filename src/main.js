@@ -206,6 +206,7 @@ function eventCard(event, highlightId) {
   const detail = [
     multi ? spanLabel(event) : event.allDay ? '' : `until ${formatClock(new Date(event.end))}`,
     event.location,
+    event.phone,
   ].filter(Boolean).join(' · ');
   if (detail) {
     const meta = document.createElement('div');
@@ -417,6 +418,8 @@ function openEvent(event) {
   document.querySelector('#event-start').value = event.allDay ? '09:00' : timeInputValue(event.start);
   document.querySelector('#event-end').value = event.allDay ? '17:00' : timeInputValue(inclusiveEnd(event));
   document.querySelector('#event-location').value = event.location || '';
+  document.querySelector('#event-phone').value = event.phone || '';
+  document.querySelector('#event-important').checked = Boolean(event.important);
   document.querySelector('#event-notes').value = event.notes || '';
   eventError.hidden = true;
   const link = document.querySelector('#event-google');
@@ -443,6 +446,8 @@ function newAppointment() {
   document.querySelector('#event-start').value = timeInputValue(start);
   document.querySelector('#event-end').value = timeInputValue(end);
   document.querySelector('#event-location').value = '';
+  document.querySelector('#event-phone').value = '';
+  document.querySelector('#event-important').checked = false;
   document.querySelector('#event-notes').value = '';
   eventError.hidden = true;
   document.querySelector('#event-google').hidden = true;
@@ -606,6 +611,8 @@ eventForm.addEventListener('submit', async (event) => {
   const patch = {
     title: document.querySelector('#event-title').value.trim() || 'Appointment',
     location: document.querySelector('#event-location').value.trim(),
+    phone: document.querySelector('#event-phone').value.trim(),
+    important: document.querySelector('#event-important').checked,
     notes: document.querySelector('#event-notes').value.trim(),
     start: start.toISOString(),
     end: end.toISOString(),
@@ -688,8 +695,26 @@ window.__vellaStatus = (text) => {
 window.__vellaListening = (active) => {
   setListening(Boolean(active));
 };
+window.__vellaRefresh = () => {
+  calendar.invalidateCache();
+  calendar.reloadUndo();
+  return refresh().then(() => syncUndo());
+};
 
-refresh().catch((error) => push('assistant', error.message));
+const wakeRow = document.querySelector('#wake-row');
+const wakeToggle = document.querySelector('#wake-toggle');
+if (window.VellaNative?.setWake) {
+  wakeRow.hidden = false;
+  const wakeOn = calendar.settings().wake !== false;
+  wakeToggle.checked = wakeOn;
+  window.VellaNative.setWake(wakeOn);
+}
+wakeToggle.addEventListener('change', (event) => {
+  calendar.saveSettings({ wake: event.target.checked });
+  window.VellaNative?.setWake?.(event.target.checked);
+});
+
+refresh().then(() => syncUndo()).catch((error) => push('assistant', error.message));
 if (!overlay) {
   push('assistant', window.VellaNative
     ? 'Tell me what to add or change. I will update the calendar on this phone.'

@@ -3,6 +3,7 @@ package com.lucasmolina.vela
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -27,6 +28,9 @@ class ListenActivity : AppCompatActivity() {
     private var pendingCommand: String? = null
     private var awaitingReply = false
     private var followUp = false
+    private var presetCommand: String? = null
+    private var greeted = false
+    private var greetThenListen = false
 
     private val giveUp = Runnable {
         if (!isFinishing && !awaitingReply) finish()
@@ -37,7 +41,7 @@ class ListenActivity : AppCompatActivity() {
     }
 
     private val requestPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        if (granted(Manifest.permission.RECORD_AUDIO)) listen()
+        if (granted(Manifest.permission.RECORD_AUDIO)) begin()
         else fail("Allow the microphone, then tap Talk to Vella again.")
     }
 
@@ -56,6 +60,11 @@ class ListenActivity : AppCompatActivity() {
         webView.loadUrl("file:///android_asset/www/index.html?overlay=1")
         speaker = VellaSpeaker(this) {
             if (isFinishing) return@VellaSpeaker
+            if (greetThenListen) {
+                greetThenListen = false
+                listen()
+                return@VellaSpeaker
+            }
             if (followUp) {
                 followUp = false
                 listen()
@@ -63,16 +72,45 @@ class ListenActivity : AppCompatActivity() {
                 finish()
             }
         }
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        holdMic()
+        presetCommand = intent.getStringExtra(MainActivity.EXTRA_COMMAND)?.trim()?.takeIf { it.isNotEmpty() }
         val missing = arrayOf(
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.READ_CALENDAR,
             Manifest.permission.WRITE_CALENDAR,
         ).filter { !granted(it) }
         if (missing.isNotEmpty()) requestPermissions.launch(missing.toTypedArray())
-        else listen()
+        else begin()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (!intent.getBooleanExtra(MainActivity.EXTRA_INTERRUPT, false) && intent.getStringExtra(MainActivity.EXTRA_COMMAND).isNullOrBlank()) {
+            return
+        }
+        speaker.stop()
+        recognizer?.cancel()
+        handler.removeCallbacks(commandTimedOut)
+        val text = intent.getStringExtra(MainActivity.EXTRA_COMMAND)?.trim().orEmpty()
+        if (text.isNotEmpty()) {
+            holdMic()
+            awaitingReply = true
+            deliver(text)
+        } else {
+            awaitingReply = false
+            followUp = false
+            greeted = false
+            listen()
+        }
     }
 
     override fun onDestroy() {
+        releaseForWake()
         handler.removeCallbacks(giveUp)
         handler.removeCallbacks(commandTimedOut)
         recognizer?.destroy()
@@ -81,8 +119,38 @@ class ListenActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private fun begin() {
+        val command = presetCommand
+        presetCommand = null
+        if (!command.isNullOrEmpty()) {
+            awaitingReply = true
+            deliver(command)
+        } else {
+            listen()
+        }
+    }
+
+    private fun holdMic() {
+        MicGate.busy = true
+        WakeService.pause()
+    }
+
+    private fun releaseForWake() {
+        MicGate.busy = false
+        WakeService.resume()
+    }
+
     private fun listen() {
         if (awaitingReply || isFinishing) return
+        holdMic()
+        if (!greeted) {
+            greeted = true
+            greetThenListen = true
+            val phrase = VellaPhrases.greeting()
+            statusView.text = phrase
+            speaker.speak(phrase)
+            return
+        }
         setFinishOnTouchOutside(true)
         speaker.stop()
         armGiveUp()
@@ -110,7 +178,7 @@ class ListenActivity : AppCompatActivity() {
             putExtra(RecognizerIntent.EXTRA_PROMPT, "Tell Vella what to change")
             putStringArrayListExtra(
                 "android.speech.extra.BIASING_STRINGS",
-                arrayListOf("add", "move", "cancel", "both", "undo", "tomorrow", "today"),
+                arrayListOf("one", "two", "three", "first", "second", "add", "move", "cancel", "both", "undo", "tomorrow", "today"),
             )
         }
     }
@@ -118,7 +186,7 @@ class ListenActivity : AppCompatActivity() {
     private fun heard(text: String) {
         val cleaned = text.trim()
         if (cleaned.isEmpty()) {
-            fail("I didn't hear anything. Tap Talk to Vella and try again.")
+            missed()
             return
         }
         awaitingReply = true
@@ -158,8 +226,19 @@ class ListenActivity : AppCompatActivity() {
                 if (next) listen() else finish()
                 return@post
             }
+            releaseForWake()
             speaker.speak(text)
         }
+    }
+
+    private fun missed() {
+        awaitingReply = false
+        followUp = false
+        greeted = true
+        greetThenListen = true
+        statusView.text = "I didn't catch that."
+        holdMic()
+        speaker.speak("I didn't catch that.")
     }
 
     private fun fail(message: String) {
@@ -168,6 +247,7 @@ class ListenActivity : AppCompatActivity() {
         awaitingReply = false
         followUp = false
         statusView.text = message
+        releaseForWake()
         speaker.speak(message)
     }
 
@@ -185,7 +265,7 @@ class ListenActivity : AppCompatActivity() {
         override fun onEndOfSpeech() {}
         override fun onError(error: Int) {
             if (awaitingReply || error == SpeechRecognizer.ERROR_CLIENT) return
-            fail("I didn't catch that. Tap Talk to Vella and try again.")
+            missed()
         }
         override fun onResults(results: Bundle?) {
             if (awaitingReply) return
@@ -199,12 +279,7 @@ class ListenActivity : AppCompatActivity() {
         override fun onEvent(eventType: Int, params: Bundle?) {}
     }
 
-    private fun bestTranscript(lines: List<String>): String {
-        return lines.firstOrNull { it.trim().startsWith("add", ignoreCase = true) }
-            ?: lines.firstOrNull { it.trim().startsWith("cancel", ignoreCase = true) }
-            ?: lines.firstOrNull { !it.trim().startsWith("at ", ignoreCase = true) }
-            ?: lines.firstOrNull().orEmpty()
-    }
+    private fun bestTranscript(lines: List<String>): String = TranscriptChoice.best(lines)
 
     private inner class Bridge {
         @JavascriptInterface
@@ -217,12 +292,24 @@ class ListenActivity : AppCompatActivity() {
         fun update(id: String, json: String): String = PhoneCalendar.update(this@ListenActivity, id, json)
 
         @JavascriptInterface
-        fun remove(id: String): String = PhoneCalendar.remove(this@ListenActivity, id)
+        fun remove(id: String, startIso: String): String = PhoneCalendar.remove(this@ListenActivity, id, startIso)
 
         @JavascriptInterface
         fun pageReady() = onPageReady()
 
         @JavascriptInterface
         fun reply(text: String, followUp: Boolean) = onReply(text, followUp)
+
+        @JavascriptInterface
+        fun saveUndo(json: String) = UndoStore.save(this@ListenActivity, json)
+
+        @JavascriptInterface
+        fun loadUndo(): String = UndoStore.load(this@ListenActivity)
+
+        @JavascriptInterface
+        fun lookupPlace(query: String): String = PlaceLookup.lookup(this@ListenActivity, query)
+
+        @JavascriptInterface
+        fun ask(question: String): String = WebAnswers.answer(this@ListenActivity, question)
     }
 }
