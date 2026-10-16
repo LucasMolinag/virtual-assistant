@@ -41,17 +41,15 @@ class WakeService : Service() {
     private var micHold: AudioRecord? = null
     private var micThread: Thread? = null
     @Volatile private var micHoldOpen = false
-    private var micStartedAt = 0L
     private val wakeMic = WakeMic(
         onUtterance = { audio ->
             ensureBrain()
             brain?.hear(audio)
         },
         onEnded = {
-            val delay = if (System.currentTimeMillis() - micStartedAt > 5_000) 1_000L else 30_000L
             handler.postDelayed({
                 if (enabled(this) && !paused && !MicGate.busy) openMic()
-            }, delay)
+            }, 1_000L)
         },
     )
 
@@ -92,6 +90,7 @@ class WakeService : Service() {
             return START_NOT_STICKY
         }
         ensureBrain()
+        screenOn = getSystemService(PowerManager::class.java).isInteractive
         if (!paused && !MicGate.busy) openMic()
         return START_STICKY
     }
@@ -135,9 +134,13 @@ class WakeService : Service() {
     }
 
     private fun openMic() {
-        wakeMic.stop()
         val lock = wakeLock
         if (lock != null && !lock.isHeld) lock.acquire()
+        if (!screenIsOn()) {
+            listenSoon(0)
+            return
+        }
+        wakeMic.stop()
         if (!listening) listenSoon(0)
     }
 
@@ -151,12 +154,29 @@ class WakeService : Service() {
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             screenOn = intent?.action != Intent.ACTION_SCREEN_OFF
-            if (!paused && !MicGate.busy) openMic()
+            if (paused || MicGate.busy) return
+            if (screenOn) {
+                listening = false
+                openMic()
+            } else {
+                startSleepMic()
+            }
         }
     }
 
     private fun listen() {
         if (!enabled(this) || paused || MicGate.busy) return
+        if (!screenIsOn()) {
+            val awaiting = phase == Phase.COMMAND || phase == Phase.GREETING
+            phase = Phase.WAKE
+            startSleepMic()
+            if (awaiting) {
+                ensureBrain()
+                brain?.expectCommand()
+            }
+            return
+        }
+        wakeMic.stop()
         if (phase == Phase.COMMAND) {
             startRecognizer(command = true)
             return
@@ -164,6 +184,19 @@ class WakeService : Service() {
         if (phase == Phase.WAKE && listening) return
         if (phase != Phase.WAKE && phase != Phase.ANSWER && phase != Phase.GREETING) return
         startRecognizer(command = false)
+    }
+
+    private fun startSleepMic() {
+        val lock = wakeLock
+        if (lock != null && !lock.isHeld) lock.acquire()
+        if (wakeMic.isRunning()) return
+        session += 1
+        listening = false
+        handler.removeCallbacks(wakeWatchdog)
+        recognizer?.cancel()
+        recognizer?.destroy()
+        recognizer = null
+        if (!wakeMic.start(this)) listenSoon(500)
     }
 
     private fun releaseWake() {
@@ -220,8 +253,9 @@ class WakeService : Service() {
     }
 
     private fun screenIsOn(): Boolean {
-        screenOn = getSystemService(PowerManager::class.java).isInteractive
-        return screenOn
+        val interactive = getSystemService(PowerManager::class.java).isInteractive
+        if (!interactive) screenOn = false
+        return screenOn && interactive
     }
 
     private val wakeWatchdog = Runnable {
@@ -236,7 +270,9 @@ class WakeService : Service() {
         recognizer?.cancel()
         recognizer?.destroy()
         recognizer = null
-        if (!paused && !MicGate.busy && screenIsOn()) listenSoon(300)
+        if (!paused && !MicGate.busy) {
+            if (screenIsOn()) listenSoon(300) else startSleepMic()
+        }
     }
 
     private fun armWakeWatchdog() {
@@ -484,7 +520,9 @@ class WakeService : Service() {
                     consider(lines, false)
                     if (phase == Phase.WAKE) {
                         listening = false
-                        if (screenOn) listenSoon(500)
+                        if (!paused && !MicGate.busy) {
+                            if (screenIsOn()) listenSoon(500) else startSleepMic()
+                        }
                     }
                 }
                 Phase.ANSWER, Phase.GREETING -> {
@@ -508,7 +546,9 @@ class WakeService : Service() {
         override fun onEndOfSegmentedSession() {
             if (active != session) return
             listening = false
-            if (phase == Phase.WAKE && screenOn && !paused && !MicGate.busy) listenSoon(400)
+            if (phase == Phase.WAKE && !paused && !MicGate.busy) {
+                if (screenIsOn()) listenSoon(400) else startSleepMic()
+            }
         }
         override fun onPartialResults(partialResults: android.os.Bundle?) {
             if (active != session || phase == Phase.COMMAND) return

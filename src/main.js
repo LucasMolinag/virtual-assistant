@@ -712,6 +712,10 @@ window.__vellaRefresh = () => {
 let wakeAwaiting = false;
 let wakeBusy = false;
 let ignoreHearUntil = 0;
+window.__vellaExpectCommand = () => {
+  wakeAwaiting = true;
+};
+
 window.__vellaHear = async (audio) => {
   if (wakeBusy || Date.now() < ignoreHearUntil) return;
   wakeBusy = true;

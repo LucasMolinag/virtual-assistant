@@ -13,6 +13,7 @@ class VoiceBrain(private val context: Context) {
     private var webView: WebView? = null
     private var pageReady = false
     private var pending: String? = null
+    private var expectWhenReady = false
     var onReply: (text: String, followUp: Boolean) -> Unit = { _, _ -> }
     var onSpeak: (String) -> Unit = {}
 
@@ -31,6 +32,18 @@ class VoiceBrain(private val context: Context) {
         view.resumeTimers()
         webView = view
         view.loadUrl("file:///android_asset/www/index.html?overlay=1")
+    }
+
+    fun expectCommand() {
+        handler.post {
+            val view = webView
+            if (!pageReady || view == null) {
+                expectWhenReady = true
+                return@post
+            }
+            expectWhenReady = false
+            view.evaluateJavascript("window.__vellaExpectCommand && window.__vellaExpectCommand()", null)
+        }
     }
 
     fun hear(audio: String) {
@@ -63,6 +76,7 @@ class VoiceBrain(private val context: Context) {
     private fun ready() {
         handler.post {
             pageReady = true
+            if (expectWhenReady) expectCommand()
             pending?.let {
                 pending = null
                 deliver(it)

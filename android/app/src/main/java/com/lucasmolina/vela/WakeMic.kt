@@ -26,13 +26,15 @@ class WakeMic(
     private var thread: Thread? = null
     @Volatile private var open = false
 
+    fun isRunning(): Boolean = open && record != null
+
     @SuppressLint("MissingPermission")
-    fun start(context: Context) {
-        if (record != null) return
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
+    fun start(context: Context): Boolean {
+        if (record != null) return true
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false
         val rate = 16000
         val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        if (min <= 0) return
+        if (min <= 0) return false
         val audio = try {
             AudioRecord(
                 MediaRecorder.AudioSource.MIC,
@@ -42,22 +44,23 @@ class WakeMic(
                 min.coerceAtLeast(rate) * 2,
             )
         } catch (_: Exception) {
-            return
+            return false
         }
         if (audio.state != AudioRecord.STATE_INITIALIZED) {
             audio.release()
-            return
+            return false
         }
         try {
             audio.startRecording()
         } catch (_: Exception) {
             audio.release()
-            return
+            return false
         }
         record = audio
         open = true
         thread = Thread({ readLoop(audio) }, "vella-wake").apply { isDaemon = true }
         thread?.start()
+        return true
     }
 
     fun stop() {
