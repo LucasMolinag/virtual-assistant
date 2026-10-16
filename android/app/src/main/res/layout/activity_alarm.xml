@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="32dp">
+
+    <TextView
+        android:id="@+id/alarm_label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Alarm"
+        android:textColor="@color/muted"
+        android:textSize="18sp" />
+
+    <TextView
+        android:id="@+id/alarm_time"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:textColor="@color/paper"
+        android:textSize="64sp" />
+
+    <TextView
+        android:id="@+id/alarm_snooze"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="48dp"
+        android:background="@color/panel"
+        android:gravity="center"
+        android:padding="18dp"
+        android:text="Snooze 5 minutes"
+        android:textColor="@color/paper"
+        android:textSize="18sp" />
+
+    <TextView
+        android:id="@+id/alarm_dismiss"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@color/accent"
+        android:gravity="center"
+        android:padding="18dp"
+        android:text="Dismiss"
+        android:textColor="@color/accent_ink"
+        android:textSize="18sp" />
+</LinearLayout>

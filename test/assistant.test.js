@@ -349,3 +349,36 @@ test('asks which place to add when the location was left out', async () => {
   assert.equal(calendar.all().find((event) => event.id === '1').location, '1 King Street, Toronto');
   assert.equal(calendar.all().find((event) => event.id === '2').location, '');
 });
+
+test('schedules a foreign clock time in local time', async () => {
+  const calendar = memoryCalendar();
+  const assistant = createAssistant({ calendar, now });
+  const added = await assistant.handle("Schedule doctor's appointment at 7pm Brazil time");
+  assert.match(added.reply, /Doctor's appointment/);
+  assert.match(added.reply, /Brazil/);
+  assert.equal(new Date(calendar.all()[0].start).toISOString(), '2026-10-09T22:00:00.000Z');
+});
+
+test('sets an alarm for a delay or a clock time', async () => {
+  const alarms = [];
+  const assistant = createAssistant({
+    calendar: memoryCalendar(),
+    now,
+    setAlarm: async (at) => {
+      alarms.push(new Date(at));
+      return true;
+    },
+  });
+  const soon = await assistant.handle('set an alarm for 20 minutes');
+  assert.equal(alarms[0].getHours(), 15);
+  assert.equal(alarms[0].getMinutes(), 20);
+  assert.match(soon.reply, /20 minutes/);
+
+  const asked = await assistant.handle('set an alarm');
+  assert.match(asked.reply, /When should I set the alarm/i);
+  const tomorrow = await assistant.handle('tomorrow at 10am');
+  assert.equal(alarms[1].getDate(), 10);
+  assert.equal(alarms[1].getHours(), 10);
+  assert.match(tomorrow.reply, /tomorrow/i);
+  assert.match(tomorrow.reply, /10:00 AM/);
+});

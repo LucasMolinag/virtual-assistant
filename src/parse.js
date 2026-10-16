@@ -1,5 +1,6 @@
 import * as chrono from 'chrono-node';
 import { addDays } from './dates.js';
+import { clockInZone, pullTimeZone } from './timezones.js';
 
 const DAY_WORD = /\b(today|tomorrow|tonight|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
 const STOP = new Set(['my', 'the', 'a', 'an', 'appointment', 'meeting', 'event', 'please', 'today', 'tomorrow', 'meu', 'minha', 'compromisso', 'reuniao', 'reunião', 'agenda', 'hoje', 'amanha', 'amanhã', 'para', 'pra']);
@@ -138,10 +139,12 @@ function extractDuration(text) {
 }
 
 function extractWhen(text, now) {
-  const results = chrono.parse(text, now, { forwardDate: true });
+  const zone = pullTimeZone(text);
+  const spoken = zone.text;
+  const results = chrono.parse(spoken, now, { forwardDate: true });
   const best = bestResult(results);
   if (!best) {
-    return { before: text, after: '', start: null, end: null, assumedTime: false, hourCertain: false, dayCertain: false };
+    return { before: spoken, after: '', start: null, end: null, assumedTime: false, hourCertain: false, dayCertain: false, zoneLabel: null, sourceTime: null };
   }
   let start = best.start.date();
   let end = best.end ? best.end.date() : null;
@@ -156,14 +159,23 @@ function extractWhen(text, now) {
     start = normalized.start;
     end = normalized.end;
   }
+  const hourCertain = Boolean(best.start.isCertain('hour'));
+  let sourceTime = null;
+  if (zone.timeZone && hourCertain && start) {
+    sourceTime = new Date(start);
+    start = clockInZone(start, zone.timeZone);
+    if (end) end = clockInZone(end, zone.timeZone);
+  }
   return {
-    before: text.slice(0, best.index),
-    after: text.slice(best.index + best.text.length),
+    before: spoken.slice(0, best.index),
+    after: spoken.slice(best.index + best.text.length),
     start,
     end,
     assumedTime,
-    hourCertain: Boolean(best.start.isCertain('hour')),
+    hourCertain,
     dayCertain: Boolean(best.start.isCertain('day') || best.start.isCertain('weekday')),
+    zoneLabel: sourceTime ? zone.label : null,
+    sourceTime,
   };
 }
 
@@ -178,6 +190,8 @@ export function parseWhen(text, now = new Date()) {
     durationMinutes: duration.minutes,
     hourCertain: when.hourCertain,
     dayCertain: when.dayCertain,
+    zoneLabel: when.zoneLabel || null,
+    sourceTime: when.sourceTime || null,
   };
 }
 
@@ -216,6 +230,8 @@ function parseAdd(text, now, raw) {
     location: located.location,
     durationMinutes: duration.minutes,
     assumedTime: when.assumedTime,
+    zoneLabel: when.zoneLabel,
+    sourceTime: when.sourceTime,
     important,
   });
 }
@@ -248,13 +264,15 @@ function parseEdit(text, now, raw) {
   if (changeTime) {
     const when = parseWhen(changeTime[2], now);
     if (when.start) {
-      return command(raw, {
-        intent: 'move',
-        query: cleanQuery(changeTime[1]),
-        start: when.start,
-        end: when.end,
-        assumedTime: when.assumedTime,
-      });
+    return command(raw, {
+      intent: 'move',
+      query: cleanQuery(changeTime[1]),
+      start: when.start,
+      end: when.end,
+      assumedTime: when.assumedTime,
+      zoneLabel: when.zoneLabel,
+      sourceTime: when.sourceTime,
+    });
     }
   }
   const askTime = text.match(/^(?:please\s+)?(?:change|update|set)\s+(?:the\s+)?time\s+(?:of|for|on)\s+(.+)$/i);
@@ -321,6 +339,11 @@ function ptWord(pattern, flags = 'giu') {
 
 function toEnglishCommand(text) {
   let t = text;
+  t = t.replace(ptWord('hor[aá]rio\\s+(?:do|de)\\s+brasil'), 'Brazil time');
+  t = t.replace(ptWord('hor[aá]rio\\s+de\\s+bras[ií]lia'), 'Brazil time');
+  t = t.replace(ptWord('daqui\\s+a\\s+(\\d+)\\s+minutos?'), 'in $1 minutes');
+  t = t.replace(ptWord('daqui\\s+a\\s+(\\d+)\\s+horas?'), 'in $1 hours');
+  t = t.replace(ptWord('em\\s+(\\d+)\\s+minutos?'), 'in $1 minutes');
   const swap = (pattern, replacement) => {
     t = t.replace(ptWord(pattern), replacement);
   };
@@ -353,6 +376,9 @@ function toEnglishCommand(text) {
   t = t.replace(/^(?:por favor[, ]+)?(?:qual [eé] o pr[oó]ximo|qual o pr[oó]ximo|o que vem agora|pr[oó]ximo compromisso)\b/iu, "what's next");
   t = t.replace(/^(?:por favor[, ]+)?(?:renomeia|renomear)\s+(.+?)\s+(?:pra|para|pro)\s+/iu, 'rename $1 to ');
   t = t.replace(/^(?:por favor[, ]+)?(?:muda|mudar|move|mover|remarca|remarcar|passa|passar)\s+(.+?)\s+(?:pra|para|pro)\s+/iu, 'move $1 to ');
+  t = t.replace(/^(?:por favor[, ]+)?(?:me\s+)?acord(?:a|ar)\b/iu, 'wake me up');
+  t = t.replace(/^(?:por favor[, ]+)?(?:coloca|colocar|bota|botar|p[oõ]e|poe|define|definir|marca|marcar)\s+(?:um\s+|o\s+)?(?:alarme|despertador|timer)\b/iu, 'set an alarm');
+  t = t.replace(/^(?:por favor[, ]+)?(?:alarme|despertador)\b/iu, 'set an alarm');
   t = t.replace(/^(?:por favor[, ]+)?(?:marca|marcar|adicione|adiciona|adicionar|coloca|colocar|bota|botar|agenda|agendar|cria|criar)\b/iu, 'add');
   t = t.replace(/^(?:por favor[, ]+)?(?:cancela|cancelar|apaga|apagar|remover|tira|tirar|deleta|deletar)\b/iu, 'cancel');
   t = t.replace(/^(?:por favor[, ]+)?remove\b(?!\s+(?:the\s+)?(?:location|address|notes?|phone)\b)/iu, 'cancel');
@@ -497,6 +523,42 @@ function repairMishearing(text) {
   );
 }
 
+function parseAlarm(text, now, raw) {
+  const alarmLead = /^(?:please\s+)?(?:set\s+(?:an?\s+|the\s+)?)?(?:alarm|timer)\b/i.test(text);
+  const wakeLead = /^(?:please\s+)?wake me(?: up)?\b/i.test(text);
+  if (!alarmLead && !wakeLead) return null;
+  let body = text
+    .replace(/^(?:please\s+)?(?:set\s+(?:an?\s+|the\s+)?)?(?:alarm|timer)\b\s*/i, '')
+    .replace(/^(?:please\s+)?wake me(?: up)?\b\s*/i, '')
+    .replace(/^in\s+(?=\d|an?\b|half\b)/i, 'for ')
+    .trim();
+  if (/^(?:(?:an|a|one)\s+hour|half\s+an?\s+hour|\d+(?:\.\d+)?\s*(?:hours|hour|hrs|hr|minutes|minute|mins|min))$/i.test(body)) {
+    body = `for ${body}`;
+  }
+  if (!body) return command(raw, { intent: 'alarm', ask: 'when' });
+  const when = parseWhen(body, now);
+  if (when.hourCertain && when.start) {
+    return command(raw, {
+      intent: 'alarm',
+      start: when.start,
+      dayCertain: when.dayCertain,
+      zoneLabel: when.zoneLabel,
+      sourceTime: when.sourceTime,
+    });
+  }
+  if (when.durationMinutes) {
+    return command(raw, {
+      intent: 'alarm',
+      start: new Date(now.getTime() + when.durationMinutes * 60000),
+      relativeMinutes: when.durationMinutes,
+    });
+  }
+  if (when.dayCertain && when.start) {
+    return command(raw, { intent: 'alarm', ask: 'time', day: when.start });
+  }
+  return command(raw, { intent: 'alarm', ask: 'when' });
+}
+
 export function parseCommand(input, now = new Date()) {
   const raw = repairMishearing(normalizeSpeech(toEnglishCommand(input.replace(/\s+/g, ' ').trim())));
   const text = raw.replace(/[?.!]+$/g, '').trim();
@@ -509,6 +571,8 @@ export function parseCommand(input, now = new Date()) {
   if (/^(?:please\s+)?(?:undo(?:\s+that)?|take that back)$/i.test(text)) {
     return command(raw, { intent: 'undo' });
   }
+  const alarm = parseAlarm(text, now, raw);
+  if (alarm) return alarm;
   const edit = parseEdit(text, now, raw);
   if (edit) return edit;
   if (/what(?:'s| is) next|what do i have next|next appointment|what(?:'s| is) coming up|whats next/i.test(text)) {
@@ -605,6 +669,8 @@ export function parseCommand(input, now = new Date()) {
       start: when.start,
       end: when.end,
       assumedTime: when.assumedTime,
+      zoneLabel: when.zoneLabel,
+      sourceTime: when.sourceTime,
     });
   }
   const moveOpen = text.match(/^(?:please\s+)?(?:move|reschedule|push|shift)\s+(.+)$/i);
@@ -624,6 +690,8 @@ export function parseCommand(input, now = new Date()) {
         end: when.end,
         location: located.location,
         assumedTime: when.assumedTime,
+        zoneLabel: when.zoneLabel,
+        sourceTime: when.sourceTime,
       });
     }
     return command(raw, { intent: 'rename', query: cleanQuery(changeTo[1]), title: sentence(changeTo[2]) });

@@ -137,7 +137,6 @@ class ListenActivity : AppCompatActivity() {
 
     private fun releaseForWake() {
         MicGate.busy = false
-        WakeService.resume()
     }
 
     private fun listen() {
@@ -311,5 +310,11 @@ class ListenActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun ask(question: String): String = WebAnswers.answer(this@ListenActivity, question)
+
+        @JavascriptInterface
+        fun setAlarm(iso: String, label: String): String = PhoneAlarms.schedule(this@ListenActivity, iso, label, 0)
+
+        @JavascriptInterface
+        fun setAlarm(iso: String, label: String, relativeSeconds: Double): String = PhoneAlarms.schedule(this@ListenActivity, iso, label, relativeSeconds.toInt())
     }
 }

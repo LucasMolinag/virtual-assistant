@@ -611,7 +611,7 @@ class WakeService : Service() {
 
         fun setEnabled(context: Context, on: Boolean) {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(ENABLED, on).apply()
-            if (on) start(context) else stop(context)
+            stop(context)
         }
 
         fun dismissNotification(context: Context) {

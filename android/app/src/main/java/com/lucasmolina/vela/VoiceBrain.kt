@@ -121,5 +121,11 @@ class VoiceBrain(private val context: Context) {
 
         @JavascriptInterface
         fun ask(question: String): String = WebAnswers.answer(context, question)
+
+        @JavascriptInterface
+        fun setAlarm(iso: String, label: String): String = PhoneAlarms.schedule(context, iso, label, 0)
+
+        @JavascriptInterface
+        fun setAlarm(iso: String, label: String, relativeSeconds: Double): String = PhoneAlarms.schedule(context, iso, label, relativeSeconds.toInt())
     }
 }

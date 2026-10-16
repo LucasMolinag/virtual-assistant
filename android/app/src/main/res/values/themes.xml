@@ -9,6 +9,10 @@
         <item name="android:textColor">@color/paper</item>
     </style>
 
+    <style name="Theme.Vela.Alarm" parent="Theme.Vela">
+        <item name="android:windowFullscreen">true</item>
+    </style>
+
     <style name="Theme.Vella.Listen" parent="Theme.AppCompat.Dialog">
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowIsFloating">true</item>

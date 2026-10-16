@@ -109,10 +109,14 @@ function push(role, text, options = {}) {
         document.querySelector('#view-chat').classList.add('has-new');
       }
     }
-    if (options.silent) return;
+    if (options.silent) {
+      window.VellaNative?.turnDone?.();
+      return;
+    }
     const spoken = options.spoken || text;
     if (overlay) window.VellaNative?.reply?.(spoken, Boolean(options.followUp));
     else if (calendar.settings().speak !== false && canSpeak()) speak(spoken);
+    window.VellaNative?.turnDone?.();
   }
 }
 

@@ -27,7 +27,18 @@ async function defaultAsk(question) {
   return { reply: "I couldn't look that up.", spoken: "I couldn't look that up." };
 }
 
-export function createAssistant({ calendar, now = () => new Date(), lookupPlace = defaultLookup, ask = defaultAsk }) {
+async function defaultSetAlarm(at, label, relativeSeconds = 0) {
+  if (typeof window === 'undefined' || typeof window.VellaNative?.setAlarm !== 'function') return false;
+  try {
+    const parsed = JSON.parse(window.VellaNative.setAlarm(new Date(at).toISOString(), label || 'Alarm', Number(relativeSeconds) || 0));
+    if (!parsed?.ok) return false;
+    return parsed.kind || 'alarm';
+  } catch {
+    return false;
+  }
+}
+
+export function createAssistant({ calendar, now = () => new Date(), lookupPlace = defaultLookup, ask = defaultAsk, setAlarm = defaultSetAlarm }) {
   let pending = null;
 
   async function upcoming() {
@@ -58,6 +69,7 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
       if (pending?.type === 'length') return finishLength(text);
       if (pending?.type === 'which') return finishWhich(text);
       if (pending?.type === 'title') return finishTitle(text);
+      if (pending?.type === 'alarm') return finishAlarm(text);
       if (pending?.type === 'choose') return finishChoice(text);
       return run(parseCommand(text, now()));
     },
@@ -79,6 +91,8 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
       end: when.end,
       durationMinutes: when.durationMinutes || draft.durationMinutes,
       assumedTime: when.assumedTime,
+      zoneLabel: when.zoneLabel,
+      sourceTime: when.sourceTime,
     });
   }
 
@@ -140,7 +154,7 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
   }
 
   function divert(text) {
-    if (!/^(?:please\s+)?(?:cancel|delete|remove|add|schedule|move|reschedule|rename|undo|what(?:'s| is)|set|change|update|open|remind|make|extend|shorten)\b/i.test(text)) return null;
+    if (!/^(?:please\s+)?(?:cancel|delete|remove|add|schedule|move|reschedule|rename|undo|what(?:'s| is)|set|change|update|open|remind|make|extend|shorten|alarm|timer|wake)\b/i.test(text)) return null;
     const other = parseCommand(text, now());
     if (!other || other.intent === 'unknown') return null;
     pending = null;
@@ -266,7 +280,67 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
       return askTime(event);
     }
     pending = null;
-    return act('move', event, placeTime(event, timed));
+    const placed = placeTime(event, timed);
+    return act('move', event, { ...placed, zoneLabel: timed.zoneLabel, sourceTime: timed.sourceTime });
+  }
+
+  function zoneNote(command) {
+    if (!command?.zoneLabel || !command.sourceTime || !command.start) return '';
+    if (Math.abs(new Date(command.start).getTime() - new Date(command.sourceTime).getTime()) <= 60000) return '';
+    const clock = formatClock(command.sourceTime);
+    const phrase = /^(?:GMT|UTC)[+-]/i.test(command.zoneLabel) ? `${clock} ${command.zoneLabel}` : `${clock} in ${command.zoneLabel}`;
+    return ` That's ${phrase}.`;
+  }
+
+  function delayPhrase(minutes) {
+    if (minutes === 60) return '1 hour';
+    if (minutes % 60 === 0) return `${minutes / 60} hours`;
+    if (minutes === 1) return '1 minute';
+    return `${minutes} minutes`;
+  }
+
+  async function finishAlarm(text) {
+    const other = divert(text);
+    if (other && other.intent !== 'alarm') return run(other);
+    const parsed = parseCommand(/^(?:please\s+)?(?:set\b|alarm\b|timer\b|wake\b)/i.test(text) ? text : `set an alarm ${text}`, now());
+    if (parsed.intent === 'alarm' && parsed.ask === 'time' && parsed.day) {
+      pending = { type: 'alarm', day: parsed.day };
+      return { reply: 'What time?', spoken: 'What time?', followUp: true };
+    }
+    if (parsed.intent !== 'alarm' || !parsed.start) {
+      return { reply: 'When should I set the alarm?', spoken: 'When should I set the alarm?', followUp: true };
+    }
+    let start = parsed.start ? new Date(parsed.start) : null;
+    if (pending.day && start && !parsed.dayCertain) {
+      const day = new Date(pending.day);
+      start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), start.getHours(), start.getMinutes(), 0, 0);
+    }
+    if (!start) return { reply: 'What time?', spoken: 'What time?', followUp: true };
+    pending = null;
+    return ring({ ...parsed, start });
+  }
+
+  async function ring(command) {
+    if (!command.start) {
+      pending = { type: 'alarm', day: command.day || null };
+      const reply = command.ask === 'time' ? 'What time?' : 'When should I set the alarm?';
+      return { reply, spoken: reply, followUp: true };
+    }
+    const at = new Date(command.start);
+    if (at.getTime() <= now().getTime() + 1000) {
+      return { reply: 'That time has already passed.', spoken: 'That time has already passed.' };
+    }
+    const kind = await setAlarm(at, 'Alarm', command.relativeMinutes ? command.relativeMinutes * 60 : 0);
+    if (!kind) {
+      return { reply: "I can't set a phone alarm from here.", spoken: "I can't set a phone alarm from here." };
+    }
+    const when = formatWhen(at, now());
+    const clockWord = kind === 'timer' ? 'Timer' : 'Alarm';
+    let reply = command.relativeMinutes
+      ? `${clockWord} set for ${delayPhrase(command.relativeMinutes)} from now, ${when}.`
+      : `${clockWord} set for ${when}.`;
+    reply += zoneNote(command);
+    return { reply, spoken: reply };
   }
 
   async function finishPlace(text) {
@@ -349,6 +423,8 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
         return choose(command);
       case 'question':
         return question(command);
+      case 'alarm':
+        return ring(command);
       default:
         return { reply: lines.missed(), spoken: lines.missed() };
     }
@@ -455,10 +531,10 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
         if (place.phone) placeNote += ` The phone number is ${place.phone}.`;
       }
       const saved = await calendar.update(event.id, patch);
-      const reply = `Moved ${saved.title} to ${formatWhen(new Date(saved.start), now())}.${placeNote}`;
+      const reply = `Moved ${saved.title} to ${formatWhen(new Date(saved.start), now())}.${placeNote}${zoneNote(command)}`;
       return {
         reply,
-        spoken: `${lines.moved(saved.title, whenSpoken(saved.start, now()))}${placeNote}`,
+        spoken: `${lines.moved(saved.title, whenSpoken(saved.start, now()))}${placeNote}${zoneNote(command)}`,
         focusDate: new Date(saved.start),
         highlightId: saved.id,
       };
@@ -604,10 +680,12 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
     if (place.phone) reply += ` The phone number is ${place.phone}.`;
     if (command.important) reply += ' I will remind you an hour before.';
     if (overlap) reply += ` That overlaps ${overlap.title}.`;
+    reply += zoneNote(command);
     let spoken = lines.added(saved.title, whenSpoken(saved.start, now()), command.assumedTime, overlap?.title);
     if (place.lookedUp) spoken += ` The address is ${place.location}.`;
     if (place.phone) spoken += ` The phone number is ${place.phone}.`;
     if (command.important) spoken += ' I will remind you an hour before.';
+    spoken += zoneNote(command);
     return {
       reply,
       spoken,

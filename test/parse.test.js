@@ -207,3 +207,34 @@ test('edits, clears, and marks an appointment important', () => {
   assert.equal(askLocation.location, '');
   assert.equal(askLocation.query, 'lunch tomorrow');
 });
+
+test('converts a named timezone into the matching instant', () => {
+  const added = parseCommand("schedule doctor's appointment at 7pm Brazil time", now);
+  assert.equal(added.intent, 'add');
+  assert.equal(added.title, "Doctor's appointment");
+  assert.equal(added.zoneLabel, 'Brazil');
+  assert.equal(added.start.toISOString(), '2026-10-09T22:00:00.000Z');
+
+  const eastern = parseCommand('add dinner at 7pm Eastern time', now);
+  assert.equal(eastern.start.toISOString(), '2026-10-09T23:00:00.000Z');
+
+  const offset = parseCommand('add a call at 7pm GMT-3', now);
+  assert.equal(offset.start.toISOString(), '2026-10-09T22:00:00.000Z');
+});
+
+test('understands alarm commands', () => {
+  const soon = parseCommand('set an alarm for 20 minutes', now);
+  assert.equal(soon.intent, 'alarm');
+  assert.equal(soon.relativeMinutes, 20);
+  assert.equal(soon.start.toISOString(), new Date(2026, 9, 9, 15, 20).toISOString());
+
+  const tomorrow = parseCommand('set an alarm tomorrow at 10am', now);
+  assert.equal(tomorrow.intent, 'alarm');
+  assert.equal(tomorrow.start.getDate(), 10);
+  assert.equal(tomorrow.start.getHours(), 10);
+  assert.equal(tomorrow.start.getMinutes(), 0);
+
+  assert.equal(parseCommand('set an alarm', now).ask, 'when');
+  assert.equal(parseCommand('set an alarm tomorrow', now).ask, 'time');
+  assert.equal(parseCommand('coloca um alarme daqui a 20 minutos', now).relativeMinutes, 20);
+});

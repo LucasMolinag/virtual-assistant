@@ -29,6 +29,12 @@ class MainActivity : AppCompatActivity() {
     private var recognizer: SpeechRecognizer? = null
     private lateinit var speaker: VellaSpeaker
     private var greetThenListen = false
+    private var session = false
+    private var listening = false
+    private var reopenMic = false
+    private val reopenSoon = Runnable {
+        if (session && !reopenMic) startCapture()
+    }
 
     private val requestCalendar = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         loadPage()
@@ -52,9 +58,16 @@ class MainActivity : AppCompatActivity() {
         webView.settings.mediaPlaybackRequiresUserGesture = false
         webView.addJavascriptInterface(VellaBridge(), "VellaNative")
         speaker = VellaSpeaker(this) {
-            if (!greetThenListen) return@VellaSpeaker
-            greetThenListen = false
-            startCapture()
+            if (greetThenListen) {
+                greetThenListen = false
+                startCapture()
+                return@VellaSpeaker
+            }
+            if (reopenMic && session) {
+                reopenMic = false
+                mainHandler.removeCallbacks(reopenSoon)
+                startCapture()
+            }
         }
         takeCommand(intent)
         takeAdd(intent)
@@ -81,17 +94,21 @@ class MainActivity : AppCompatActivity() {
         VelaWidgetProvider.updateAll(this)
         maybeListen()
         if (pageReady) webView.evaluateJavascript("window.__vellaRefresh && window.__vellaRefresh()", null)
-        if (WakeService.enabled(this)) WakeService.start(this)
+        WakeService.stop(this)
+        if (WakeService.enabled(this)) openSession()
     }
 
     override fun onPause() {
         refreshUi = null
         greetThenListen = false
+        reopenMic = false
+        session = false
+        listening = false
+        mainHandler.removeCallbacks(reopenSoon)
         recognizer?.cancel()
-        if (MicGate.busy) {
-            MicGate.busy = false
-            WakeService.resume()
-        }
+        pageListening(false)
+        MicGate.busy = false
+        WakeService.stop(this)
         super.onPause()
     }
 
@@ -118,7 +135,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun speak(text: String) {
-        if (::speaker.isInitialized) speaker.speak(text)
+        if (!::speaker.isInitialized || text.isBlank()) return
+        mainHandler.post {
+            mainHandler.removeCallbacks(reopenSoon)
+            if (session) {
+                recognizer?.cancel()
+                listening = false
+                pageListening(false)
+                reopenMic = true
+            }
+        }
+        speaker.speak(text)
+    }
+
+    fun turnDone() {
+        mainHandler.post {
+            mainHandler.removeCallbacks(reopenSoon)
+            if (!session || reopenMic) return@post
+            startCapture()
+        }
     }
 
     fun stopSpeaking() {
@@ -127,30 +162,37 @@ class MainActivity : AppCompatActivity() {
 
     fun listen() {
         stopSpeaking()
-        MicGate.busy = true
-        WakeService.pause()
         if (!granted(Manifest.permission.RECORD_AUDIO)) {
-            releaseMic()
             requestMic.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            releaseMic()
             pageStatus("Speech recognition is not available on this phone.")
             return
         }
-        greetThenListen = true
-        speaker.speak(VellaPhrases.greeting())
+        openSession()
+    }
+
+    private fun openSession() {
+        if (!granted(Manifest.permission.RECORD_AUDIO) || !SpeechRecognizer.isRecognitionAvailable(this)) return
+        session = true
+        MicGate.busy = true
+        if (listening) return
+        startCapture()
     }
 
     private fun startCapture() {
-        if (!granted(Manifest.permission.RECORD_AUDIO) || !SpeechRecognizer.isRecognitionAvailable(this)) {
-            releaseMic()
-            return
-        }
+        if (!session || listening || !granted(Manifest.permission.RECORD_AUDIO) || !SpeechRecognizer.isRecognitionAvailable(this)) return
+        if (!lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) return
         val current = recognizer ?: SpeechRecognizer.createSpeechRecognizer(this).also { recognizer = it }
         current.setRecognitionListener(listener)
-        current.startListening(recognizeIntent())
+        listening = true
+        try {
+            current.startListening(recognizeIntent())
+        } catch (_: Exception) {
+            listening = false
+            mainHandler.postDelayed({ if (session) startCapture() }, 200)
+        }
     }
 
     private fun loadPage() {
@@ -239,12 +281,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun keepListening() {
-        MicGate.busy = true
-        WakeService.pause()
-        speaker.stop()
-        greetThenListen = true
-        pageStatus("I didn't catch that.")
-        speaker.speak("I didn't catch that.")
+        if (!session) return
+        listening = false
+        startCapture()
     }
 
     private fun pageDraft(text: String) {
@@ -262,19 +301,30 @@ class MainActivity : AppCompatActivity() {
         override fun onEndOfSpeech() {}
         override fun onError(error: Int) {
             pageListening(false)
+            listening = false
             val visible = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
-            if (error == SpeechRecognizer.ERROR_CLIENT || !visible) {
-                releaseMic()
+            if (!session || !visible) return
+            if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                recognizer?.destroy()
+                recognizer = null
+                mainHandler.postDelayed({ if (session) startCapture() }, 200)
                 return
             }
-            keepListening()
+            startCapture()
         }
         override fun onResults(results: Bundle?) {
             pageListening(false)
+            listening = false
+            recognizer?.cancel()
             val text = TranscriptChoice.best(results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty())
-            if (text.isBlank()) keepListening() else {
-                releaseMic()
-                submit(text)
+            if (text.isBlank()) {
+                if (session) startCapture()
+                return
+            }
+            submit(text)
+            if (session) {
+                mainHandler.removeCallbacks(reopenSoon)
+                mainHandler.postDelayed(reopenSoon, 400)
             }
         }
         override fun onPartialResults(partialResults: Bundle?) {
@@ -312,6 +362,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
+        fun turnDone() = this@MainActivity.turnDone()
+
+        @JavascriptInterface
         fun saveUndo(json: String) = UndoStore.save(this@MainActivity, json)
 
         @JavascriptInterface
@@ -327,24 +380,34 @@ class MainActivity : AppCompatActivity() {
         fun setWake(enabled: Boolean) {
             mainHandler.post { enableWake(enabled) }
         }
+
+        @JavascriptInterface
+        fun setAlarm(iso: String, label: String): String = PhoneAlarms.schedule(this@MainActivity, iso, label, 0)
+
+        @JavascriptInterface
+        fun setAlarm(iso: String, label: String, relativeSeconds: Double): String = PhoneAlarms.schedule(this@MainActivity, iso, label, relativeSeconds.toInt())
     }
 
     private fun releaseMic() {
+        session = false
+        listening = false
+        reopenMic = false
         MicGate.busy = false
-        WakeService.resume()
+        recognizer?.cancel()
+        pageListening(false)
     }
 
     private fun enableWake(enabled: Boolean) {
+        WakeService.setEnabled(this, enabled)
         if (!enabled) {
-            WakeService.setEnabled(this, false)
+            releaseMic()
             return
         }
         if (!granted(Manifest.permission.RECORD_AUDIO)) {
             requestWake.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
             return
         }
-        WakeService.setEnabled(this, true)
-        prepareBackgroundListening()
+        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) openSession()
     }
 
     private fun prepareBackgroundListening() {
@@ -366,10 +429,7 @@ class MainActivity : AppCompatActivity() {
     private val requestLocation = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
 
     private val requestWake = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        if (granted(Manifest.permission.RECORD_AUDIO)) {
-            WakeService.setEnabled(this, true)
-            prepareBackgroundListening()
-        }
+        if (granted(Manifest.permission.RECORD_AUDIO)) enableWake(true)
     }
 
     companion object {
