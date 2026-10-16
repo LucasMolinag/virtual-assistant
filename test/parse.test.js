@@ -183,6 +183,17 @@ test('edits, clears, and marks an appointment important', () => {
   assert.equal(time.intent, 'move');
   assert.equal(time.start.getHours(), 16);
 
+  const askTime = parseCommand('Change the time for Lunch tomorrow', now);
+  assert.equal(askTime.intent, 'move');
+  assert.equal(askTime.ask, 'time');
+  assert.equal(askTime.query, 'Lunch tomorrow');
+  assert.equal(askTime.start, null);
+
+  assert.equal(parseCommand('rename Lunch', now).ask, 'name');
+  assert.equal(parseCommand('change the date for Lunch tomorrow', now).ask, 'day');
+  assert.equal(parseCommand('add a note to Lunch tomorrow', now).notes, '');
+  assert.equal(parseCommand('set the phone number of Lunch', now).phone, '');
+
   const important = parseCommand('add an important dentist tomorrow at 3pm', now);
   assert.equal(important.intent, 'add');
   assert.equal(important.title, 'Dentist');

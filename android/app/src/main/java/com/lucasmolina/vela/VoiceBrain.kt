@@ -14,6 +14,7 @@ class VoiceBrain(private val context: Context) {
     private var pageReady = false
     private var pending: String? = null
     var onReply: (text: String, followUp: Boolean) -> Unit = { _, _ -> }
+    var onSpeak: (String) -> Unit = {}
 
     fun start() {
         if (webView != null) return
@@ -24,11 +25,20 @@ class VoiceBrain(private val context: Context) {
         view.settings.allowFileAccess = true
         @Suppress("DEPRECATION")
         view.settings.allowFileAccessFromFileURLs = true
+        view.settings.mediaPlaybackRequiresUserGesture = false
         view.addJavascriptInterface(Bridge(), "VellaNative")
         view.onResume()
         view.resumeTimers()
         webView = view
         view.loadUrl("file:///android_asset/www/index.html?overlay=1")
+    }
+
+    fun hear(audio: String) {
+        handler.post {
+            val view = webView ?: return@post
+            if (!pageReady) return@post
+            view.evaluateJavascript("window.__vellaHear(${JSONObject.quote(audio)})", null)
+        }
     }
 
     fun deliver(text: String) {
@@ -79,6 +89,11 @@ class VoiceBrain(private val context: Context) {
         @JavascriptInterface
         fun reply(text: String, followUp: Boolean) {
             handler.post { onReply(text, followUp) }
+        }
+
+        @JavascriptInterface
+        fun speak(text: String) {
+            handler.post { onSpeak(text) }
         }
 
         @JavascriptInterface

@@ -50,6 +50,14 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
       }
       if (pending?.type === 'when') return finishAdd(text);
       if (pending?.type === 'place') return finishPlace(text);
+      if (pending?.type === 'time') return finishTime(text);
+      if (pending?.type === 'name') return finishName(text);
+      if (pending?.type === 'note') return finishNote(text);
+      if (pending?.type === 'phone') return finishPhone(text);
+      if (pending?.type === 'day') return finishDay(text);
+      if (pending?.type === 'length') return finishLength(text);
+      if (pending?.type === 'which') return finishWhich(text);
+      if (pending?.type === 'title') return finishTitle(text);
       if (pending?.type === 'choose') return finishChoice(text);
       return run(parseCommand(text, now()));
     },
@@ -72,6 +80,193 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
       durationMinutes: when.durationMinutes || draft.durationMinutes,
       assumedTime: when.assumedTime,
     });
+  }
+
+  function clockFrom(text) {
+    const cleaned = text.replace(/[?.!]+$/g, '').trim();
+    const words = {
+      one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+    };
+    const match = cleaned.match(/^(?:at\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight|\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?$/i);
+    if (!match) return null;
+    const token = match[1].toLowerCase();
+    let hour = words[token] ?? Number(token);
+    const minute = match[2] ? Number(match[2]) : 0;
+    if (!Number.isFinite(hour) || hour > 23 || minute > 59) return null;
+    const meridiem = (match[3] || '').toLowerCase().replace(/\./g, '');
+    if (token === 'noon') hour = 12;
+    else if (token === 'midnight') hour = 0;
+    else if (meridiem.startsWith('p') && hour < 12) hour += 12;
+    else if (meridiem.startsWith('a') && hour === 12) hour = 0;
+    else if (!meridiem && hour >= 1 && hour <= 6) hour += 12;
+    const start = new Date(now());
+    start.setHours(hour, minute, 0, 0);
+    return { start, end: null, hourCertain: true, dayCertain: false };
+  }
+
+  function placeTime(event, when) {
+    let start = new Date(when.start);
+    if (!when.dayCertain) {
+      const kept = new Date(event.start);
+      start = new Date(kept.getFullYear(), kept.getMonth(), kept.getDate(), start.getHours(), start.getMinutes(), 0, 0);
+    }
+    const span = when.end
+      ? new Date(when.end).getTime() - new Date(when.start).getTime()
+      : new Date(event.end).getTime() - new Date(event.start).getTime();
+    const end = new Date(start.getTime() + (span > 0 ? span : 60 * 60000));
+    return { start, end };
+  }
+
+  function askTime(event) {
+    pending = { type: 'time', event };
+    return {
+      reply: 'What time?',
+      spoken: 'What time?',
+      followUp: true,
+      highlightId: event.id,
+      focusDate: new Date(event.start),
+    };
+  }
+
+  function follow(event, type, reply, extra = {}) {
+    pending = { type, event, ...extra };
+    return {
+      reply,
+      spoken: reply,
+      followUp: true,
+      highlightId: event?.id,
+      focusDate: event ? new Date(event.start) : undefined,
+    };
+  }
+
+  function divert(text) {
+    if (!/^(?:please\s+)?(?:cancel|delete|remove|add|schedule|move|reschedule|rename|undo|what(?:'s| is)|set|change|update|open|remind|make|extend|shorten)\b/i.test(text)) return null;
+    const other = parseCommand(text, now());
+    if (!other || other.intent === 'unknown') return null;
+    pending = null;
+    return other;
+  }
+
+  function answerText(text) {
+    return text
+      .replace(/[?.!]+$/g, '')
+      .replace(/^(?:please\s+)?(?:it(?:'s| is)\s+)?(?:call it\s+|name it\s+|to\s+)?/i, '')
+      .trim();
+  }
+
+  function titled(text) {
+    const value = answerText(text);
+    if (!value) return '';
+    return value.charAt(0).toUpperCase() + value.slice(1);
+  }
+
+  function minutesFrom(text) {
+    const spoken = text.replace(/[?.!]+$/g, '').trim();
+    if (/^(?:for\s+)?half\s+an?\s+hours?$/i.test(spoken)) return 30;
+    if (/^(?:for\s+)?(?:an|one)\s+hours?$/i.test(spoken)) return 60;
+    const match = spoken.match(/^(?:for\s+)?(\d+(?:\.\d+)?)\s*(hours|hour|hrs|hr|minutes|minute|mins|min)$/i);
+    if (!match) return null;
+    const amount = Number(match[1]);
+    return /^h/i.test(match[2]) ? Math.round(amount * 60) : amount;
+  }
+
+  async function finishName(text) {
+    const event = pending.event;
+    const other = divert(text);
+    if (other) return run(other);
+    const title = titled(text);
+    if (!title) return follow(event, 'name', 'What name?');
+    pending = null;
+    return act('rename', event, { title });
+  }
+
+  async function finishNote(text) {
+    const event = pending.event;
+    const other = divert(text);
+    if (other) return run(other);
+    const notes = text.replace(/^(?:please\s+)?(?:saying|that)\s+/i, '').replace(/[?.!]+$/g, '').trim();
+    if (!notes) return follow(event, 'note', 'What should the note say?');
+    pending = null;
+    return act('notes', event, { notes });
+  }
+
+  async function finishPhone(text) {
+    const event = pending.event;
+    const other = divert(text);
+    if (other) return run(other);
+    const phone = text
+      .replace(/^(?:please\s+)?(?:it(?:'s| is)\s+)?(?:the\s+)?(?:phone\s+)?(?:number\s+)?(?:is\s+)?/i, '')
+      .replace(/[?.!]+$/g, '')
+      .trim();
+    if (!phone) return follow(event, 'phone', "What's the phone number?");
+    pending = null;
+    return act('phone', event, { phone });
+  }
+
+  async function finishDay(text) {
+    const event = pending.event;
+    const when = parseWhen(text, now());
+    if (!when.start) {
+      const other = divert(text);
+      if (other) return run(other);
+      return follow(event, 'day', 'What day?');
+    }
+    const start = new Date(when.start);
+    if (!when.hourCertain) {
+      const kept = new Date(event.start);
+      start.setHours(kept.getHours(), kept.getMinutes(), 0, 0);
+    }
+    const span = new Date(event.end).getTime() - new Date(event.start).getTime();
+    pending = null;
+    return act('move', event, { start, end: new Date(start.getTime() + (span > 0 ? span : 60 * 60000)) });
+  }
+
+  async function finishLength(text) {
+    const event = pending.event;
+    const mode = pending.mode || 'set';
+    const minutes = minutesFrom(text);
+    if (!minutes) {
+      const other = divert(text);
+      if (other) return run(other);
+      return follow(event, 'length', 'How long?', { mode });
+    }
+    pending = null;
+    return act('duration', event, { durationMinutes: minutes, durationMode: mode });
+  }
+
+  async function finishWhich(text) {
+    const command = pending.command;
+    const other = divert(text);
+    if (other) return run(other);
+    const query = answerText(text);
+    if (!query) return { reply: 'Which appointment?', spoken: 'Which appointment?', followUp: true };
+    pending = null;
+    return choose({ ...command, query });
+  }
+
+  async function finishTitle(text) {
+    const other = divert(text);
+    if (other) return run(other);
+    const value = answerText(text);
+    if (!value) return { reply: 'What should I add?', spoken: 'What should I add?', followUp: true };
+    pending = null;
+    return run(parseCommand(/^add\b/i.test(value) ? value : `add ${value}`, now()));
+  }
+
+  async function finishTime(text) {
+    const event = pending.event;
+    const when = parseWhen(text, now());
+    const timed = when.hourCertain ? when : clockFrom(text);
+    if (!timed?.start) {
+      const other = parseCommand(text, now());
+      if (other.intent !== 'unknown') {
+        pending = null;
+        return run(other);
+      }
+      return askTime(event);
+    }
+    pending = null;
+    return act('move', event, placeTime(event, timed));
   }
 
   async function finishPlace(text) {
@@ -131,6 +326,10 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
       case 'next':
         return nextEvent();
       case 'add':
+        if (command.ask === 'title' || !command.title) {
+          pending = { type: 'title' };
+          return { reply: 'What should I add?', spoken: 'What should I add?', followUp: true };
+        }
         if (!command.start) {
           pending = { type: 'when', draft: command };
           return { reply: `When should I schedule ${command.title}?`, spoken: lines.askWhen(command.title), followUp: true };
@@ -162,6 +361,10 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
         spoken: lines.needCancelName(),
         followUp: true,
       };
+    }
+    if (!String(command.query || '').trim()) {
+      pending = { type: 'which', command };
+      return { reply: 'Which appointment?', spoken: 'Which appointment?', followUp: true };
     }
     const { matches, named, name, day } = lookupEvents(await upcoming(), command.query, now());
     if (!matches.length) {
@@ -225,7 +428,18 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
       };
     }
     if (action === 'move') {
-      if (!command.start) return { reply: `When should I move ${event.title}?`, spoken: lines.askMove(event.title), followUp: true };
+      if (!command.start) {
+        if (command.ask === 'day') return follow(event, 'day', 'What day?');
+        if (command.ask === 'time') return askTime(event);
+        pending = { type: 'time', event };
+        return {
+          reply: `When should I move ${event.title}?`,
+          spoken: lines.askMove(event.title),
+          followUp: true,
+          highlightId: event.id,
+          focusDate: new Date(event.start),
+        };
+      }
       const previous = new Date(event.end) - new Date(event.start);
       const end = command.end ?? new Date(command.start.getTime() + previous);
       const patch = {
@@ -250,6 +464,7 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
       };
     }
     if (action === 'rename') {
+      if (!command.title) return follow(event, 'name', 'What name?');
       const saved = await calendar.update(event.id, { title: command.title });
       return { reply: `Renamed it to ${saved.title}.`, spoken: lines.renamed(saved.title), highlightId: saved.id, focusDate: new Date(saved.start) };
     }
@@ -268,6 +483,7 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
       return { reply, spoken: reply, highlightId: saved.id, focusDate: new Date(saved.start) };
     }
     if (action === 'phone') {
+      if (!command.phone) return follow(event, 'phone', "What's the phone number?");
       const saved = await calendar.update(event.id, { phone: command.phone });
       const reply = `The phone number for ${saved.title} is ${saved.phone || command.phone}.`;
       return { reply, spoken: reply, highlightId: saved.id, focusDate: new Date(saved.start) };
@@ -293,10 +509,12 @@ export function createAssistant({ calendar, now = () => new Date(), lookupPlace 
       return { reply, spoken: reply, highlightId: saved.id, focusDate: new Date(saved.start) };
     }
     if (action === 'notes') {
+      if (!command.notes) return follow(event, 'note', 'What should the note say?');
       const saved = await calendar.update(event.id, { notes: command.notes });
       return { reply: `Added a note to ${saved.title}.`, spoken: lines.notes(saved.title), highlightId: saved.id, focusDate: new Date(saved.start), openEvent: saved };
     }
     if (action === 'duration') {
+      if (!command.durationMinutes) return follow(event, 'length', 'How long?', { mode: command.durationMode || 'set' });
       const start = new Date(event.start);
       let end = new Date(event.end);
       if (command.durationMode === 'set') end = addMinutes(start, command.durationMinutes);

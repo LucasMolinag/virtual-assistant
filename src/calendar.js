@@ -472,13 +472,14 @@ export function createCalendar() {
       readUndo();
       const record = undoRecord;
       if (!record) throw fail('Nothing to undo.', 'undo');
-      writeUndo(null);
       if (record.type === 'create') {
         await removeStored(record.event.id);
+        writeUndo(null);
         return { message: `Undone. I removed ${record.event.title}.`, focusDate: record.event.start };
       }
       if (record.type === 'delete') {
         const saved = await createStored(record.event);
+        writeUndo(null);
         return { message: `Undone. I put ${saved.title} back.`, event: saved, focusDate: saved.start };
       }
       if (record.type === 'delete-many') {
@@ -487,6 +488,7 @@ export function createCalendar() {
           const saved = await createStored(event);
           if (!first) first = saved;
         }
+        writeUndo(null);
         return {
           message: `Undone. I put ${record.events.length} appointments back.`,
           event: first,
@@ -502,6 +504,7 @@ export function createCalendar() {
         start: record.event.start,
         end: record.event.end,
       });
+      writeUndo(null);
       return { message: `Undone. I restored ${saved.title}.`, event: saved, focusDate: saved.start };
     },
     async importLocalToGoogle() {

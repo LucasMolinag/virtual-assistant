@@ -19,6 +19,7 @@ function blank(raw) {
     durationMinutes: null,
     durationMode: null,
     assumedTime: false,
+    ask: null,
     rangeStart: null,
     rangeEnd: null,
     rangeLabel: null,
@@ -140,7 +141,7 @@ function extractWhen(text, now) {
   const results = chrono.parse(text, now, { forwardDate: true });
   const best = bestResult(results);
   if (!best) {
-    return { before: text, after: '', start: null, end: null, assumedTime: false };
+    return { before: text, after: '', start: null, end: null, assumedTime: false, hourCertain: false, dayCertain: false };
   }
   let start = best.start.date();
   let end = best.end ? best.end.date() : null;
@@ -161,6 +162,8 @@ function extractWhen(text, now) {
     start,
     end,
     assumedTime,
+    hourCertain: Boolean(best.start.isCertain('hour')),
+    dayCertain: Boolean(best.start.isCertain('day') || best.start.isCertain('weekday')),
   };
 }
 
@@ -173,6 +176,8 @@ export function parseWhen(text, now = new Date()) {
     end: when.end,
     assumedTime: when.assumedTime,
     durationMinutes: duration.minutes,
+    hourCertain: when.hourCertain,
+    dayCertain: when.dayCertain,
   };
 }
 
@@ -229,6 +234,10 @@ function parseEdit(text, now, raw) {
   if (phoneOf) return command(raw, { intent: 'phone', query: cleanQuery(phoneOf[1]), phone: phoneOf[2].trim() });
   const phoneAdd = text.match(/^(?:please\s+)?add\s+(?:a\s+)?phone(?:\s+number)?\s+(.+?)\s+(?:to|for|on)\s+(.+)$/i);
   if (phoneAdd) return command(raw, { intent: 'phone', query: cleanQuery(phoneAdd[2]), phone: phoneAdd[1].trim() });
+  const askPhone = text.match(/^(?:please\s+)?(?:set|change|update|add)\s+(?:the\s+|a\s+)?phone(?:\s+number)?\s+(?:of|for|on)\s+(.+)$/i);
+  if (askPhone && !/\bto\b/i.test(askPhone[1])) {
+    return command(raw, { intent: 'phone', query: cleanQuery(askPhone[1]), phone: '', ask: 'phone' });
+  }
 
   const askPlace = text.match(/^(?:please\s+)?add\s+(?:a\s+|the\s+)?(?:location|address)\s+(?:to|for|on)\s+(.+)$/i);
   if (askPlace) return command(raw, { intent: 'location', query: cleanQuery(askPlace[1]), location: '' });
@@ -248,11 +257,21 @@ function parseEdit(text, now, raw) {
       });
     }
   }
+  const askTime = text.match(/^(?:please\s+)?(?:change|update|set)\s+(?:the\s+)?time\s+(?:of|for|on)\s+(.+)$/i);
+  if (askTime && !/\bto\b/i.test(askTime[1])) {
+    return command(raw, { intent: 'move', query: cleanQuery(askTime[1]), ask: 'time' });
+  }
+  const askDay = text.match(/^(?:please\s+)?(?:change|update|set)\s+(?:the\s+)?(?:date|day)\s+(?:of|for|on)\s+(.+)$/i);
+  if (askDay && !/\bto\b/i.test(askDay[1])) {
+    return command(raw, { intent: 'move', query: cleanQuery(askDay[1]), ask: 'day' });
+  }
 
   const forget = text.match(/^(?:please\s+)?don'?t remind me(?:\s+about|\s+of)?\s+(.+)$/i);
   if (forget) return command(raw, { intent: 'forget', query: cleanQuery(forget[1]) });
   const remind = text.match(/^(?:please\s+)?remind me(?:\s+about|\s+of)?\s+(.+)$/i);
   if (remind) return command(raw, { intent: 'remind', query: cleanQuery(remind[1]) });
+  if (/^(?:please\s+)?remind me$/i.test(text)) return command(raw, { intent: 'remind', query: '' });
+  if (/^(?:please\s+)?don'?t remind me$/i.test(text)) return command(raw, { intent: 'forget', query: '' });
   const important = text.match(/^(?:please\s+)?(?:make|mark)\s+(.+?)\s+important$/i);
   if (important) return command(raw, { intent: 'remind', query: cleanQuery(important[1]) });
   return null;
@@ -499,9 +518,16 @@ export function parseCommand(input, now = new Date()) {
   const note = text.match(/^(?:please\s+)?(?:add\s+)?(?:a\s+)?note\s+(?:on|for|to)\s+(.+?)\s+(?:saying|that|:)\s+(.+)$/i)
     || text.match(/^(?:please\s+)?(?:change|update|set)\s+(?:the\s+)?notes?\s+(?:on|for|of)\s+(.+?)\s+to\s+(.+)$/i);
   if (note) return command(raw, { intent: 'notes', query: cleanQuery(note[1]), notes: note[2].trim() });
+  const askNote = text.match(/^(?:please\s+)?(?:add\s+)?(?:a\s+)?note\s+(?:on|for|to)\s+(.+)$/i)
+    || text.match(/^(?:please\s+)?(?:change|update|set)\s+(?:the\s+)?notes?\s+(?:on|for|of)\s+(.+)$/i);
+  if (askNote) return command(raw, { intent: 'notes', query: cleanQuery(askNote[1]), notes: '', ask: 'note' });
 
   const location = text.match(/^(?:please\s+)?(?:set|change|update)\s+(?:the\s+)?location\s+(?:of|for)\s+(.+?)\s+to\s+(.+)$/i);
   if (location) return command(raw, { intent: 'location', query: cleanQuery(location[1]), location: location[2].trim() });
+  const askLocation = text.match(/^(?:please\s+)?(?:set|change|update)\s+(?:the\s+)?(?:location|address)\s+(?:of|for|on)\s+(.+)$/i);
+  if (askLocation && !/\bto\b/i.test(askLocation[1])) {
+    return command(raw, { intent: 'location', query: cleanQuery(askLocation[1]), location: '' });
+  }
 
   const makeDuration = text.match(/^(?:please\s+)?(?:make|set)\s+(.+?)\s+(\d+)\s*(minutes|minute|mins|min|hours|hour|hrs|hr)(?:\s+long)?$/i);
   if (makeDuration) {
@@ -530,6 +556,24 @@ export function parseCommand(input, now = new Date()) {
       durationMode: 'shorten',
     });
   }
+  const longer = text.match(/^(?:please\s+)?(?:make|set)\s+(.+?)\s+(longer|shorter)$/i);
+  if (longer) {
+    return command(raw, {
+      intent: 'duration',
+      query: cleanQuery(longer[1]),
+      durationMode: /shorter/i.test(longer[2]) ? 'shorten' : 'extend',
+      ask: 'length',
+    });
+  }
+  const stretch = text.match(/^(?:please\s+)?(?:extend|lengthen|shorten|reduce)\s+(.+)$/i);
+  if (stretch && !/\bby\b/i.test(stretch[1])) {
+    return command(raw, {
+      intent: 'duration',
+      query: cleanQuery(stretch[1]),
+      durationMode: /^(?:please\s+)?(?:shorten|reduce)\b/i.test(text) ? 'shorten' : 'extend',
+      ask: 'length',
+    });
+  }
 
   if (/^(?:please\s+)?(?:cancel|delete|remove|drop)\b/i.test(text)) {
     let rest = text.replace(/^(?:please\s+)?(?:cancel|delete|remove|drop)\b\s*/i, '');
@@ -545,6 +589,12 @@ export function parseCommand(input, now = new Date()) {
 
   const rename = text.match(/^(?:please\s+)?(?:rename|retitle)\s+(.+?)\s+\bto\b\s+(.+)$/i);
   if (rename) return command(raw, { intent: 'rename', query: cleanQuery(rename[1]), title: sentence(rename[2]) });
+  const renameOpen = text.match(/^(?:please\s+)?(?:rename|retitle)\s+(.+)$/i);
+  if (renameOpen) {
+    const target = renameOpen[1].replace(/\s+\bto\b\s*$/i, '');
+    if (!/\bto\b/i.test(target)) return command(raw, { intent: 'rename', query: cleanQuery(target), ask: 'name' });
+  }
+  if (/^(?:please\s+)?(?:rename|retitle)$/i.test(text)) return command(raw, { intent: 'rename', query: '', ask: 'name' });
 
   const move = text.match(/^(?:please\s+)?(?:move|reschedule|push|shift)\s+(.+?)\s+\bto\b\s+(.+)$/i);
   if (move) {
@@ -556,6 +606,10 @@ export function parseCommand(input, now = new Date()) {
       end: when.end,
       assumedTime: when.assumedTime,
     });
+  }
+  const moveOpen = text.match(/^(?:please\s+)?(?:move|reschedule|push|shift)\s+(.+)$/i);
+  if (moveOpen && !/\bto\b/i.test(moveOpen[1])) {
+    return command(raw, { intent: 'move', query: cleanQuery(moveOpen[1]), ask: 'time' });
   }
 
   const changeTo = text.match(/^(?:please\s+)?(?:change|update)\s+(.+?)\s+\bto\b\s+(.+)$/i);
@@ -575,6 +629,9 @@ export function parseCommand(input, now = new Date()) {
     return command(raw, { intent: 'rename', query: cleanQuery(changeTo[1]), title: sentence(changeTo[2]) });
   }
 
+  if (/^(?:please\s+)?(?:add|schedule|create|book|set up|setup|put|new)$/i.test(text)) {
+    return command(raw, { intent: 'add', title: '', ask: 'title' });
+  }
   if (/^(?:please\s+)?(?:add|schedule|create|book|set up|setup|put|new)\b/i.test(text)) {
     return parseAdd(text, now, raw);
   }

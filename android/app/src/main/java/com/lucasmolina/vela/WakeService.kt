@@ -7,18 +7,19 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.speech.RecognitionListener
-import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.core.app.NotificationCompat
@@ -35,13 +36,31 @@ class WakeService : Service() {
     private var afterSpeech: (() -> Unit)? = null
     private var wakeArmed = false
     private var listening = false
+    private var micAlive = false
     private var session = 0
+    private var micHold: AudioRecord? = null
+    private var micThread: Thread? = null
+    @Volatile private var micHoldOpen = false
+    private var micStartedAt = 0L
+    private val wakeMic = WakeMic(
+        onUtterance = { audio ->
+            ensureBrain()
+            brain?.hear(audio)
+        },
+        onEnded = {
+            val delay = if (System.currentTimeMillis() - micStartedAt > 5_000) 1_000L else 30_000L
+            handler.postDelayed({
+                if (enabled(this) && !paused && !MicGate.busy) openMic()
+            }, delay)
+        },
+    )
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         instance = this
+        showForeground()
         val power = getSystemService(PowerManager::class.java)
         screenOn = power.isInteractive
         wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "vella:hey").apply {
@@ -61,19 +80,27 @@ class WakeService : Service() {
         } else {
             registerReceiver(screenReceiver, filter)
         }
-        showForeground()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        showForeground()
         if (!enabled(this)) {
+            wakeMic.stop()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            dismissNotification(this)
             stopSelf()
             return START_NOT_STICKY
         }
-        if (phase == Phase.WAKE && screenOn) listenSoon(400)
+        ensureBrain()
+        if (!paused && !MicGate.busy) openMic()
         return START_STICKY
     }
 
     override fun onDestroy() {
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (_: Exception) {
+        }
         handler.removeCallbacksAndMessages(null)
         try {
             unregisterReceiver(screenReceiver)
@@ -81,6 +108,8 @@ class WakeService : Service() {
         }
         recognizer?.destroy()
         recognizer = null
+        wakeMic.stop()
+        releaseMicHold()
         brain?.shutdown()
         brain = null
         speaker?.shutdown()
@@ -91,27 +120,25 @@ class WakeService : Service() {
         super.onDestroy()
     }
 
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        if (enabled(this)) {
-            val restart = Intent(applicationContext, WakeService::class.java)
-            try {
-                if (Build.VERSION.SDK_INT >= 26) applicationContext.startForegroundService(restart)
-                else applicationContext.startService(restart)
-            } catch (_: Exception) {
-            }
-            scheduleRestart()
-        }
-        super.onTaskRemoved(rootIntent)
-    }
-
     private fun pauseListening() {
         paused = true
-        if (phase == Phase.WAKE) recognizer?.cancel()
+        session += 1
+        listening = false
+        recognizer?.cancel()
+        wakeMic.stop()
+        releaseMicHold()
     }
 
     private fun resumeListening() {
         paused = false
-        if (phase == Phase.WAKE && screenOn) listenSoon(600)
+        if (!MicGate.busy) openMic()
+    }
+
+    private fun openMic() {
+        wakeMic.stop()
+        val lock = wakeLock
+        if (lock != null && !lock.isHeld) lock.acquire()
+        if (!listening) listenSoon(0)
     }
 
     private fun listenSoon(delayMs: Long) {
@@ -124,34 +151,109 @@ class WakeService : Service() {
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             screenOn = intent?.action != Intent.ACTION_SCREEN_OFF
-            if (screenOn) {
-                if (phase == Phase.WAKE && !paused && !MicGate.busy) listenSoon(400)
-            } else if (phase == Phase.WAKE) {
-                stopIdleMic()
-            }
+            if (!paused && !MicGate.busy) openMic()
         }
     }
 
     private fun listen() {
-        if (!enabled(this)) return
-        val barging = phase == Phase.ANSWER || phase == Phase.GREETING
+        if (!enabled(this) || paused || MicGate.busy) return
         if (phase == Phase.COMMAND) {
             startRecognizer(command = true)
             return
         }
-        if (paused || MicGate.busy) return
-        if (phase == Phase.WAKE && (!screenOn || listening)) return
-        if (phase != Phase.WAKE && !barging) return
+        if (phase == Phase.WAKE && listening) return
+        if (phase != Phase.WAKE && phase != Phase.ANSWER && phase != Phase.GREETING) return
         startRecognizer(command = false)
+    }
+
+    private fun releaseWake() {
+        paused = true
+        handler.removeCallbacks(listenAgain)
+        stopIdleMic()
+    }
+
+    private fun holdMic() {
+        if (micHold != null) return
+        val rate = 16000
+        val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        if (min <= 0) return
+        try {
+            val record = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                rate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                min * 2,
+            )
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                record.release()
+                return
+            }
+            record.startRecording()
+            micHold = record
+            micHoldOpen = true
+            val buffer = ByteArray(min)
+            micThread = Thread({
+                while (micHoldOpen && micHold === record) {
+                    if (record.read(buffer, 0, buffer.size) < 0) break
+                }
+            }, "vella-mic").apply { isDaemon = true }
+            micThread?.start()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun releaseMicHold() {
+        micHoldOpen = false
+        val record = micHold
+        micHold = null
+        try {
+            record?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            micThread?.join(300)
+        } catch (_: Exception) {
+        }
+        micThread = null
+        record?.release()
+    }
+
+    private fun screenIsOn(): Boolean {
+        screenOn = getSystemService(PowerManager::class.java).isInteractive
+        return screenOn
+    }
+
+    private val wakeWatchdog = Runnable {
+        if (phase != Phase.WAKE || !listening) return@Runnable
+        if (micAlive) {
+            micAlive = false
+            armWakeWatchdog()
+            return@Runnable
+        }
+        session += 1
+        listening = false
+        recognizer?.cancel()
+        recognizer?.destroy()
+        recognizer = null
+        if (!paused && !MicGate.busy && screenIsOn()) listenSoon(300)
+    }
+
+    private fun armWakeWatchdog() {
+        handler.removeCallbacks(wakeWatchdog)
+        if (phase == Phase.WAKE) handler.postDelayed(wakeWatchdog, 25_000)
     }
 
     private fun stopIdleMic() {
         session += 1
         listening = false
         handler.removeCallbacks(listenAgain)
+        handler.removeCallbacks(wakeWatchdog)
         recognizer?.cancel()
         recognizer?.destroy()
         recognizer = null
+        wakeMic.stop()
+        releaseMicHold()
     }
 
     private fun holdTurn() {
@@ -166,18 +268,28 @@ class WakeService : Service() {
     private fun ensureBrain() {
         if (brain != null) return
         brain = VoiceBrain(this).also { created ->
-            created.onReply = { text, followUp -> onAnswer(text, followUp) }
+            created.onSpeak = { text -> speaker?.speak(text) }
+            created.onReply = { text, _ ->
+                MainActivity.refreshUi?.invoke()
+                VelaWidgetProvider.updateAll(this)
+                if (text.isNotBlank()) speaker?.speak(text)
+            }
             created.start()
         }
     }
 
     private fun startRecognizer(command: Boolean) {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) return
-        if (!command && phase == Phase.WAKE && (!screenOn || listening)) return
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            if (!command && phase == Phase.WAKE) listenSoon(2000)
+            return
+        }
+        if (!command && phase == Phase.WAKE && listening) return
         val active = ++session
         val current = recognizer ?: createRecognizer().also { recognizer = it }
         current.setRecognitionListener(listenerFor(active))
+        micAlive = false
         listening = true
+        if (!command) armWakeWatchdog()
         try {
             current.startListening(recognizeIntent(command))
         } catch (_: Exception) {
@@ -191,18 +303,7 @@ class WakeService : Service() {
     }
 
     private fun createRecognizer(): SpeechRecognizer {
-        val component = recognitionService()
-        return if (component != null) SpeechRecognizer.createSpeechRecognizer(this, component)
-        else SpeechRecognizer.createSpeechRecognizer(this)
-    }
-
-    private fun recognitionService(): ComponentName? {
-        val matches = packageManager.queryIntentServices(Intent(RecognitionService.SERVICE_INTERFACE), 0)
-        val preferred = matches.firstOrNull { it.serviceInfo.packageName == "com.google.android.tts" }
-            ?: matches.firstOrNull { it.serviceInfo.packageName == "com.google.android.googlequicksearchbox" }
-            ?: matches.firstOrNull()
-            ?: return null
-        return ComponentName(preferred.serviceInfo.packageName, preferred.serviceInfo.name)
+        return SpeechRecognizer.createSpeechRecognizer(this)
     }
 
     private fun recognizeIntent(command: Boolean): Intent {
@@ -215,15 +316,13 @@ class WakeService : Service() {
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1600L)
                 putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
             } else {
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-                putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, true)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 120_000L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 120_000L)
-                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 120_000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
+                if (Build.VERSION.SDK_INT >= 33) putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, true)
             }
             putStringArrayListExtra(
                 "android.speech.extra.BIASING_STRINGS",
-                arrayListOf("Hey Vella", "one", "two", "three", "first", "second", "add", "move", "cancel", "undo"),
+                arrayListOf("Hey Vella", "Hey Bella", "Vella", "one", "two", "three", "first", "second", "add", "move", "cancel", "undo"),
             )
         }
     }
@@ -241,7 +340,7 @@ class WakeService : Service() {
             }
             if (!wakeArmed) {
                 wakeArmed = true
-                handler.postDelayed(fireWake, if (phase == Phase.WAKE) 1100 else 350)
+                handler.postDelayed(fireWake, if (phase == Phase.WAKE) 200 else 150)
             }
             return
         }
@@ -258,6 +357,7 @@ class WakeService : Service() {
         session += 1
         wakeArmed = false
         handler.removeCallbacks(fireWake)
+        handler.removeCallbacks(wakeWatchdog)
         listening = false
         recognizer?.cancel()
         afterSpeech = null
@@ -282,24 +382,28 @@ class WakeService : Service() {
     }
 
     private fun onAnswer(text: String, followUp: Boolean) {
+        MainActivity.refreshUi?.invoke()
+        VelaWidgetProvider.updateAll(this)
         val spoken = text.ifBlank { if (followUp) "" else "Okay." }
         if (spoken.isBlank()) {
-            if (followUp) captureCommand() else returnToWake()
+            resumeWake()
             return
         }
         phase = Phase.ANSWER
-        speakThen(spoken) {
-            if (followUp) captureCommand() else returnToWake()
-        }
+        speakThen(spoken) { resumeWake() }
+    }
+
+    private fun resumeWake() {
+        phase = Phase.WAKE
+        listening = false
+        if (!paused && !MicGate.busy) listenSoon(150)
     }
 
     private fun returnToWake() {
         phase = Phase.WAKE
         releaseTurn()
         listening = false
-        recognizer?.destroy()
-        recognizer = null
-        if (screenOn) listenSoon(600) else stopIdleMic()
+        recognizer?.cancel()
     }
 
     private fun speakThen(text: String, then: () -> Unit) {
@@ -310,7 +414,6 @@ class WakeService : Service() {
             return
         }
         voice.speak(text)
-        if (phase == Phase.ANSWER || phase == Phase.GREETING) listenSoon(200)
     }
 
     private fun heardCommand(lines: List<String>) {
@@ -330,25 +433,34 @@ class WakeService : Service() {
     }
 
     private fun listenerFor(active: Int) = object : RecognitionListener {
-        override fun onReadyForSpeech(params: android.os.Bundle?) {}
-        override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onReadyForSpeech(params: android.os.Bundle?) {
+            if (active == session) micAlive = true
+        }
+        override fun onBeginningOfSpeech() {
+            if (active == session) micAlive = true
+        }
+        override fun onRmsChanged(rmsdB: Float) {
+            if (active == session) micAlive = true
+        }
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
         override fun onError(error: Int) {
             if (active != session) return
             listening = false
-            val dead = error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
+            handler.removeCallbacks(wakeWatchdog)
+            val dead = error == SpeechRecognizer.ERROR_CLIENT ||
+                error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
+                error == SpeechRecognizer.ERROR_SERVER
             if (dead) {
                 recognizer?.destroy()
                 recognizer = null
             }
             when (phase) {
-                Phase.WAKE -> if (!paused && !MicGate.busy && screenOn) {
+                Phase.WAKE -> if (!paused && !MicGate.busy) {
                     val delay = when (error) {
                         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 1500L
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT, SpeechRecognizer.ERROR_NO_MATCH -> 900L
-                        else -> 600L
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT, SpeechRecognizer.ERROR_NO_MATCH -> 0L
+                        else -> 400L
                     }
                     listenSoon(delay)
                 }
@@ -365,7 +477,8 @@ class WakeService : Service() {
         }
         override fun onResults(results: android.os.Bundle?) {
             if (active != session) return
-            val lines = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+            handler.removeCallbacks(wakeWatchdog)
+            val lines = transcripts(results)
             when (phase) {
                 Phase.WAKE -> {
                     consider(lines, false)
@@ -389,7 +502,7 @@ class WakeService : Service() {
         }
         override fun onSegmentResults(segmentResults: android.os.Bundle) {
             if (active != session || phase == Phase.COMMAND) return
-            val lines = segmentResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+            val lines = transcripts(segmentResults)
             consider(lines, false)
         }
         override fun onEndOfSegmentedSession() {
@@ -399,60 +512,34 @@ class WakeService : Service() {
         }
         override fun onPartialResults(partialResults: android.os.Bundle?) {
             if (active != session || phase == Phase.COMMAND) return
-            val lines = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
-            consider(lines, true)
+            micAlive = true
+            consider(transcripts(partialResults), true)
         }
         override fun onEvent(eventType: Int, params: android.os.Bundle?) {}
     }
 
-    private fun scheduleRestart() {
-        val restart = Intent(applicationContext, WakeService::class.java)
-        val pending = PendingIntent.getService(
-            applicationContext,
-            8,
-            restart,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val alarm = getSystemService(AlarmManager::class.java)
-        val at = System.currentTimeMillis() + 1000
-        if (Build.VERSION.SDK_INT >= 31 && !alarm.canScheduleExactAlarms()) {
-            alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending)
-        } else {
-            alarm.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending)
-        }
-    }
-
     private fun showForeground() {
-        val notice = notification()
+        val manager = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 26) {
+            val channel = NotificationChannel(CHANNEL, "Vella", NotificationManager.IMPORTANCE_MIN)
+            channel.setSound(null, null)
+            channel.enableVibration(false)
+            channel.setShowBadge(false)
+            manager.createNotificationChannel(channel)
+        }
+        val notice: Notification = NotificationCompat.Builder(this, CHANNEL)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setSilent(true)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .setShowWhen(false)
+            .build()
         if (Build.VERSION.SDK_INT >= 30) {
             startForeground(NOTIFICATION_ID, notice, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         } else {
             startForeground(NOTIFICATION_ID, notice)
         }
-    }
-
-    private fun notification(): Notification {
-        val manager = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26) {
-            manager.createNotificationChannel(
-                NotificationChannel(CHANNEL, "Hey Vella", NotificationManager.IMPORTANCE_MIN),
-            )
-        }
-        manager.cancel(43)
-        val open = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        return NotificationCompat.Builder(this, CHANNEL)
-            .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Hey Vella")
-            .setContentText("Listening for “Hey Vella”")
-            .setSilent(true)
-            .setOngoing(true)
-            .setContentIntent(open)
-            .build()
     }
 
     private enum class Phase { WAKE, GREETING, COMMAND, ANSWER }
@@ -462,7 +549,18 @@ class WakeService : Service() {
         private const val ENABLED = "enabled"
         private const val CHANNEL = "vella_wake_quiet"
         private const val NOTIFICATION_ID = 42
-        private val wake = Regex("\\bhey\\s+(?:vella|vela|bella|villa)\\b", RegexOption.IGNORE_CASE)
+        private val wake = Regex(
+            """\bhey\b[\s,.'’"!?-]*\b(?:vella|vela|velma|bella|villa|fella)\b""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        private fun transcripts(results: android.os.Bundle?): List<String> {
+            if (results == null) return emptyList()
+            val lines = ArrayList<String>()
+            results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.let { lines.addAll(it) }
+            results.getStringArrayList("android.speech.extra.UNSTABLE_TEXT")?.let { lines.addAll(it) }
+            return lines
+        }
 
         @Volatile
         private var instance: WakeService? = null
@@ -476,13 +574,38 @@ class WakeService : Service() {
             if (on) start(context) else stop(context)
         }
 
+        fun dismissNotification(context: Context) {
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return
+            manager.cancel(NOTIFICATION_ID)
+            manager.cancel(43)
+            if (Build.VERSION.SDK_INT >= 26) manager.deleteNotificationChannel(CHANNEL)
+            val pending = PendingIntent.getService(
+                context,
+                8,
+                Intent(context, WakeService::class.java),
+                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE,
+            ) ?: return
+            context.getSystemService(AlarmManager::class.java)?.cancel(pending)
+            pending.cancel()
+        }
+
         fun start(context: Context) {
+            if (!enabled(context)) return
             val intent = Intent(context, WakeService::class.java)
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
+            } catch (_: Exception) {
+            }
         }
 
         fun stop(context: Context) {
+            instance?.releaseWake()
             context.stopService(Intent(context, WakeService::class.java))
+            dismissNotification(context)
+        }
+
+        fun park() {
+            instance?.releaseWake()
         }
 
         fun pause() {

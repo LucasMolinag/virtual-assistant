@@ -2,7 +2,8 @@ import './styles.css';
 import { createAssistant } from './assistant.js';
 import { createCalendar } from './calendar.js';
 import { addDays, dateInputValue, eventCoversDay, formatClock, formatDayHeading, fromDateAndTime, spansMultipleDays, startOfDay, startOfMonth, startOfWeek, timeInputValue } from './dates.js';
-import { canSpeak, createSpeechController, silence, speak, unlockSpeech } from './speech.js';
+import { canSpeak, createSpeechController, silence, speak, transcribePcm16, unlockSpeech } from './speech.js';
+import { commandAfterWake } from './wake.js';
 import { lines } from './voice.js';
 
 const EXAMPLES = [
@@ -127,7 +128,9 @@ function showNotice(text, keep) {
 }
 
 function syncUndo() {
-  document.querySelector('#undo').hidden = !calendar.canUndo();
+  const button = document.querySelector('#undo');
+  button.hidden = false;
+  button.disabled = !calendar.canUndo();
 }
 
 function sameDay(a, b) {
@@ -458,7 +461,7 @@ function newAppointment() {
 
 async function submit(text) {
   const value = text.trim();
-  if (!value) return;
+  if (!value) return null;
   commandEl.value = '';
   push('user', value);
   try {
@@ -466,11 +469,14 @@ async function submit(text) {
     if (result.focusDate) selected = startOfDay(result.focusDate);
     await refresh(result.highlightId);
     push('assistant', result.reply, { spoken: result.spoken, followUp: result.followUp });
-    syncUndo();
     if (result.openEvent) openEvent(events.find((event) => event.id === result.openEvent.id) || result.openEvent);
+    return result;
   } catch (error) {
     push('assistant', error.message || 'Something went wrong talking to the calendar.');
     if (error.code === 'auth' || error.code === 'config') settingsDialog.showModal();
+    return null;
+  } finally {
+    syncUndo();
   }
 }
 
@@ -624,11 +630,12 @@ eventForm.addEventListener('submit', async (event) => {
     selected = startOfDay(start);
     eventDialog.close();
     await refresh(saved.id);
-    syncUndo();
     push('assistant', `Saved ${saved.title}.`, { silent: true, quiet: true });
   } catch (error) {
     eventError.hidden = false;
     eventError.textContent = error.message;
+  } finally {
+    syncUndo();
   }
 });
 
@@ -637,11 +644,11 @@ document.querySelector('#undo').addEventListener('click', async () => {
     const result = await calendar.undo();
     if (result.focusDate) selected = startOfDay(new Date(result.focusDate));
     await refresh(result.event?.id);
-    syncUndo();
     push('assistant', result.message, { silent: true, quiet: true });
   } catch (error) {
-    syncUndo();
     push('assistant', error.message || 'Nothing to undo.', { silent: true, quiet: true });
+  } finally {
+    syncUndo();
   }
 });
 
@@ -654,11 +661,12 @@ document.querySelector('#event-delete').addEventListener('click', async () => {
     editing = null;
     eventDialog.close();
     await refresh();
-    syncUndo();
     push('assistant', `Deleted ${title}.`, { silent: true, quiet: true });
   } catch (error) {
     eventError.hidden = false;
     eventError.textContent = error.message;
+  } finally {
+    syncUndo();
   }
 });
 
@@ -701,6 +709,38 @@ window.__vellaRefresh = () => {
   return refresh().then(() => syncUndo());
 };
 
+let wakeAwaiting = false;
+let wakeBusy = false;
+let ignoreHearUntil = 0;
+window.__vellaHear = async (audio) => {
+  if (wakeBusy || Date.now() < ignoreHearUntil) return;
+  wakeBusy = true;
+  try {
+    let text = '';
+    try {
+      text = await transcribePcm16(audio);
+    } catch {
+      return;
+    }
+    const command = commandAfterWake(text);
+    if (command === null && !wakeAwaiting) return;
+    if (command === '') {
+      wakeAwaiting = true;
+      ignoreHearUntil = Date.now() + 1600;
+      speak('Yes?');
+      return;
+    }
+    const value = command === null ? text : command;
+    if (!value) return;
+    wakeAwaiting = false;
+    ignoreHearUntil = Date.now() + 2200;
+    const result = await submit(value);
+    wakeAwaiting = Boolean(result?.followUp);
+  } finally {
+    wakeBusy = false;
+  }
+};
+
 const wakeRow = document.querySelector('#wake-row');
 const wakeToggle = document.querySelector('#wake-toggle');
 if (window.VellaNative?.setWake) {
@@ -714,7 +754,10 @@ wakeToggle.addEventListener('change', (event) => {
   window.VellaNative?.setWake?.(event.target.checked);
 });
 
-refresh().then(() => syncUndo()).catch((error) => push('assistant', error.message));
+refresh().then(() => syncUndo()).catch((error) => {
+  syncUndo();
+  push('assistant', error.message);
+});
 if (!overlay) {
   push('assistant', window.VellaNative
     ? 'Tell me what to add or change. I will update the calendar on this phone.'

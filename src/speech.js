@@ -1,5 +1,34 @@
 import { concatFloat32, resample, rms, usableTranscript } from './audio.js';
 
+let sharedModel = null;
+
+function sharedTranscriber() {
+  if (!sharedModel) {
+    sharedModel = import('@huggingface/transformers').then(({ pipeline }) => pipeline(
+      'automatic-speech-recognition',
+      'Xenova/whisper-tiny.en',
+      { dtype: 'q8', device: 'wasm' },
+    )).catch((error) => {
+      sharedModel = null;
+      throw error;
+    });
+  }
+  return sharedModel;
+}
+
+export async function transcribePcm16(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  const view = new Int16Array(bytes.buffer);
+  const samples = new Float32Array(view.length);
+  for (let i = 0; i < view.length; i += 1) samples[i] = view[i] / 32768;
+  if (samples.length < 1600) return '';
+  const transcriber = await sharedTranscriber();
+  const result = await transcriber(samples);
+  return usableTranscript(result?.text) || '';
+}
+
 const IDLE = '';
 const VOICE = 0.015;
 

@@ -73,13 +73,30 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        refreshUi = {
+            mainHandler.post {
+                if (pageReady) webView.evaluateJavascript("window.__vellaRefresh && window.__vellaRefresh()", null)
+            }
+        }
         VelaWidgetProvider.updateAll(this)
         maybeListen()
         if (pageReady) webView.evaluateJavascript("window.__vellaRefresh && window.__vellaRefresh()", null)
-        if (WakeService.enabled(this)) WakeService.resume()
+        if (WakeService.enabled(this)) WakeService.start(this)
+    }
+
+    override fun onPause() {
+        refreshUi = null
+        greetThenListen = false
+        recognizer?.cancel()
+        if (MicGate.busy) {
+            MicGate.busy = false
+            WakeService.resume()
+        }
+        super.onPause()
     }
 
     override fun onDestroy() {
+        refreshUi = null
         recognizer?.destroy()
         recognizer = null
         if (::speaker.isInitialized) speaker.shutdown()
@@ -245,7 +262,8 @@ class MainActivity : AppCompatActivity() {
         override fun onEndOfSpeech() {}
         override fun onError(error: Int) {
             pageListening(false)
-            if (error == SpeechRecognizer.ERROR_CLIENT) {
+            val visible = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+            if (error == SpeechRecognizer.ERROR_CLIENT || !visible) {
                 releaseMic()
                 return
             }
@@ -321,17 +339,12 @@ class MainActivity : AppCompatActivity() {
             WakeService.setEnabled(this, false)
             return
         }
-        val needed = mutableListOf<String>()
-        if (!granted(Manifest.permission.RECORD_AUDIO)) needed.add(Manifest.permission.RECORD_AUDIO)
-        if (android.os.Build.VERSION.SDK_INT >= 33 && !granted(android.Manifest.permission.POST_NOTIFICATIONS)) {
-            needed.add(android.Manifest.permission.POST_NOTIFICATIONS)
+        if (!granted(Manifest.permission.RECORD_AUDIO)) {
+            requestWake.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+            return
         }
-        if (needed.isEmpty()) {
-            WakeService.setEnabled(this, true)
-            prepareBackgroundListening()
-        } else {
-            requestWake.launch(needed.toTypedArray())
-        }
+        WakeService.setEnabled(this, true)
+        prepareBackgroundListening()
     }
 
     private fun prepareBackgroundListening() {
@@ -353,9 +366,7 @@ class MainActivity : AppCompatActivity() {
     private val requestLocation = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
 
     private val requestWake = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        val mic = granted(Manifest.permission.RECORD_AUDIO)
-        val notifications = android.os.Build.VERSION.SDK_INT < 33 || granted(android.Manifest.permission.POST_NOTIFICATIONS)
-        if (mic && notifications) {
+        if (granted(Manifest.permission.RECORD_AUDIO)) {
             WakeService.setEnabled(this, true)
             prepareBackgroundListening()
         }
@@ -366,5 +377,8 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_COMMAND = "command"
         const val EXTRA_ADD = "add"
         const val EXTRA_INTERRUPT = "interrupt"
+
+        @Volatile
+        var refreshUi: (() -> Unit)? = null
     }
 }
